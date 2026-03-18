@@ -5,6 +5,24 @@ use alloc::vec::Vec;
 
 use crate::{AllocationError, AllocationId};
 
+/// Identifier for one page inside a [`RectAtlasSet`].
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct AtlasPageId(u32);
+
+impl AtlasPageId {
+    /// Creates an atlas page identifier from a raw integer.
+    #[must_use]
+    pub const fn new(raw: u32) -> Self {
+        Self(raw)
+    }
+
+    /// Returns the raw page identifier.
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// Packed atlas rectangle returned from [`AtlasSlot::rect`] or
 /// [`RectAtlas::free`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +94,45 @@ impl AtlasSlot {
     #[must_use]
     pub const fn rect(self) -> AtlasRect {
         self.rect
+    }
+}
+
+/// Allocation record returned by [`RectAtlasSet::allocate_in`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PagedAtlasSlot {
+    page: AtlasPageId,
+    slot: AtlasSlot,
+}
+
+impl PagedAtlasSlot {
+    /// Creates a paged atlas allocation from a page id and page-local slot.
+    #[must_use]
+    pub const fn new(page: AtlasPageId, slot: AtlasSlot) -> Self {
+        Self { page, slot }
+    }
+
+    /// Returns the page that owns this allocation.
+    #[must_use]
+    pub const fn page(self) -> AtlasPageId {
+        self.page
+    }
+
+    /// Returns the page-local atlas allocation.
+    #[must_use]
+    pub const fn slot(self) -> AtlasSlot {
+        self.slot
+    }
+
+    /// Returns the page-local allocation id.
+    #[must_use]
+    pub const fn allocation(self) -> AllocationId {
+        self.slot.allocation()
+    }
+
+    /// Returns the packed atlas rectangle.
+    #[must_use]
+    pub const fn rect(self) -> AtlasRect {
+        self.slot.rect()
     }
 }
 
@@ -160,6 +217,44 @@ impl RectAtlasStats {
     }
 }
 
+/// Aggregate summary returned by [`RectAtlasSet::stats`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RectAtlasSetStats {
+    pages: u32,
+    allocated: u32,
+    free_regions: u32,
+}
+
+impl RectAtlasSetStats {
+    /// Creates aggregate atlas-set statistics from raw values.
+    #[must_use]
+    pub const fn new(pages: u32, allocated: u32, free_regions: u32) -> Self {
+        Self {
+            pages,
+            allocated,
+            free_regions,
+        }
+    }
+
+    /// Returns the number of pages in the set.
+    #[must_use]
+    pub const fn pages(self) -> u32 {
+        self.pages
+    }
+
+    /// Returns the total number of live allocations across all pages.
+    #[must_use]
+    pub const fn allocated(self) -> u32 {
+        self.allocated
+    }
+
+    /// Returns the total number of free regions tracked across all pages.
+    #[must_use]
+    pub const fn free_regions(self) -> u32 {
+        self.free_regions
+    }
+}
+
 /// Bounded atlas allocator used by atlas-style workloads.
 ///
 /// This is intentionally simple. It exists to make the atlas integration story
@@ -209,6 +304,16 @@ pub struct RectAtlas {
     // TODO(cachet): Add free-region coalescing or stronger fragmentation
     // mitigation once a real workload proves the need.
     free_regions: Vec<AtlasRect>,
+}
+
+/// Storage-side multi-page wrapper around several [`RectAtlas`] pages.
+///
+/// This type keeps page ownership and page-local statistics in
+/// `cachet_storage` without teaching the storage layer anything about
+/// atlas-specific routing policy.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RectAtlasSet {
+    pages: Vec<RectAtlas>,
 }
 
 impl RectAtlas {
@@ -331,6 +436,75 @@ impl RectAtlas {
     }
 }
 
+impl RectAtlasSet {
+    /// Creates an empty set of atlas pages.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { pages: Vec::new() }
+    }
+
+    /// Adds one page to the set and returns its storage-side page id.
+    pub fn add_page(&mut self, width: u16, height: u16) -> Result<AtlasPageId, AllocationError> {
+        let page_id = AtlasPageId::new(
+            u32::try_from(self.pages.len()).map_err(|_| AllocationError::IdExhausted)?,
+        );
+        self.pages.push(RectAtlas::new(width, height));
+        Ok(page_id)
+    }
+
+    /// Returns the atlas page for a page id, if present.
+    #[must_use]
+    pub fn page(&self, page: AtlasPageId) -> Option<&RectAtlas> {
+        let index = usize::try_from(page.get()).ok()?;
+        self.pages.get(index)
+    }
+
+    /// Returns page-local statistics for one page id, if present.
+    #[must_use]
+    pub fn page_stats(&self, page: AtlasPageId) -> Option<RectAtlasStats> {
+        Some(self.page(page)?.stats())
+    }
+
+    /// Allocates within one specific page.
+    pub fn allocate_in(
+        &mut self,
+        page: AtlasPageId,
+        width: u16,
+        height: u16,
+    ) -> Result<PagedAtlasSlot, AllocationError> {
+        let index = usize::try_from(page.get()).map_err(|_| AllocationError::UnknownAllocation)?;
+        let slot = self
+            .pages
+            .get_mut(index)
+            .ok_or(AllocationError::UnknownAllocation)?
+            .allocate(width, height)?;
+        Ok(PagedAtlasSlot::new(page, slot))
+    }
+
+    /// Frees one paged allocation and returns its reclaimed rectangle.
+    pub fn free(&mut self, slot: PagedAtlasSlot) -> Result<AtlasRect, AllocationError> {
+        let index =
+            usize::try_from(slot.page().get()).map_err(|_| AllocationError::UnknownAllocation)?;
+        self.pages
+            .get_mut(index)
+            .ok_or(AllocationError::UnknownAllocation)?
+            .free(slot.allocation())
+    }
+
+    /// Returns aggregate diagnostics across all pages.
+    #[must_use]
+    pub fn stats(&self) -> RectAtlasSetStats {
+        let mut allocated = 0_u32;
+        let mut free_regions = 0_u32;
+        for page in &self.pages {
+            let stats = page.stats();
+            allocated = allocated.saturating_add(stats.allocated());
+            free_regions = free_regions.saturating_add(stats.free_regions());
+        }
+        RectAtlasSetStats::new(self.pages.len() as u32, allocated, free_regions)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,5 +549,60 @@ mod tests {
             .expect_err("stale allocation ids must be rejected");
 
         assert_eq!(error, AllocationError::UnknownAllocation);
+    }
+
+    #[test]
+    fn rect_atlas_set_tracks_page_identity() {
+        let mut pages = RectAtlasSet::new();
+        let page0 = pages.add_page(8, 8).expect("page id fits");
+        let page1 = pages.add_page(8, 8).expect("page id fits");
+
+        let first = pages.allocate_in(page0, 4, 3).expect("page 0 has room");
+        let second = pages.allocate_in(page1, 4, 3).expect("page 1 has room");
+
+        assert_eq!(first.page(), page0);
+        assert_eq!(second.page(), page1);
+        assert_eq!(first.rect(), AtlasRect::new(0, 0, 4, 3));
+        assert_eq!(second.rect(), AtlasRect::new(0, 0, 4, 3));
+    }
+
+    #[test]
+    fn rect_atlas_set_reuses_freed_space_within_the_same_page() {
+        let mut pages = RectAtlasSet::new();
+        let page0 = pages.add_page(8, 8).expect("page id fits");
+        let _page1 = pages.add_page(8, 8).expect("page id fits");
+
+        let first = pages.allocate_in(page0, 4, 3).expect("page 0 has room");
+        let freed_rect = pages.free(first).expect("live allocation can be freed");
+        let reused = pages
+            .allocate_in(page0, 4, 3)
+            .expect("freed space can be reused");
+
+        assert_eq!(freed_rect, AtlasRect::new(0, 0, 4, 3));
+        assert_eq!(reused.page(), page0);
+        assert_eq!(reused.rect(), freed_rect);
+    }
+
+    #[test]
+    fn rect_atlas_set_reports_page_local_and_aggregate_stats() {
+        let mut pages = RectAtlasSet::new();
+        let page0 = pages.add_page(8, 8).expect("page id fits");
+        let page1 = pages.add_page(8, 8).expect("page id fits");
+
+        let first = pages.allocate_in(page0, 4, 3).expect("page 0 has room");
+        let _second = pages.allocate_in(page1, 4, 3).expect("page 1 has room");
+        let _ = pages.free(first).expect("live allocation can be freed");
+
+        let page0_stats = pages.page_stats(page0).expect("page 0 stats exist");
+        let page1_stats = pages.page_stats(page1).expect("page 1 stats exist");
+        let total = pages.stats();
+
+        assert_eq!(page0_stats.allocated(), 0);
+        assert_eq!(page0_stats.free_regions(), 1);
+        assert_eq!(page1_stats.allocated(), 1);
+        assert_eq!(page1_stats.free_regions(), 0);
+        assert_eq!(total.pages(), 2);
+        assert_eq!(total.allocated(), 1);
+        assert_eq!(total.free_regions(), 1);
     }
 }
