@@ -9,8 +9,9 @@ caches.
 What it demonstrates:
 
 - describing glyphs with `cachet::atlas::ArtifactRequest`
+- processing them through `cachet::atlas::AtlasCache`
 - keeping logical residency policy in `cachet::residency`
-- assigning physical atlas rects with `cachet::storage::RectAtlas`
+- assigning physical atlas rects through `cachet::storage`
 - handing resolved placement back to the caller as
   `cachet::atlas::ResolvedArtifact`
 
@@ -21,4 +22,5 @@ cargo run -p glyph_cache_demo
 ```
 
 The output is structured in phases so you can see the intended handoff between
-the atlas adapter, the residency kernel, and the allocator.
+atlas request vocabulary, the atlas cache controller, the residency kernel, and
+the storage layer.

@@ -32,17 +32,19 @@
 //!   build that request
 //! - [`AtlasPageRouter`] is the atlas-side routing policy for choosing among
 //!   compatible storage pages
+//! - [`AtlasCache`] is the small composition layer that wires residency,
+//!   routing, and storage together
 //! - [`ResolvedArtifact`] is what you hand back to callers after storage has
 //!   assigned a slot
+//! - one logical key is expected to have one stable [`AtlasClass`] and
+//!   [`ArtifactSize`]
 //!
 //! This example wraps one glyph request, admits it, allocates one atlas slot,
 //! and then exposes the resolved placement.
 //!
 //! ```
-//! use cachet_atlas::{
-//!     ArtifactRequest, ArtifactSize, AtlasClass, AtlasPageRouter, ResolvedArtifact,
-//! };
-//! use cachet_residency::{Budget, Epoch, Priority, ResidencyTracker};
+//! use cachet_atlas::{ArtifactRequest, ArtifactSize, AtlasCache, AtlasClass, AtlasPageRouter};
+//! use cachet_residency::{Budget, Epoch, Priority};
 //! use cachet_storage::RectAtlasSet;
 //!
 //! #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -56,27 +58,28 @@
 //!     0,
 //! );
 //!
-//! let mut tracker = ResidencyTracker::new(Budget::new(8, 8));
-//! tracker.begin_epoch(Epoch::new(1));
-//! tracker.request(request.request().clone());
-//! let _handle = tracker.admit(request.request(), 1).expect("room for one glyph");
-//!
 //! let mut pages = RectAtlasSet::new();
 //! let page = pages.add_page(64, 64).expect("page id fits");
 //! let mut router = AtlasPageRouter::new();
 //! assert!(router.register_page(AtlasClass::new(1), page));
 //!
-//! let page = router
-//!     .best_page_for(&request, &pages)
-//!     .expect("one compatible page");
-//! let slot = pages
-//!     .allocate_in(page, request.size().width(), request.size().height())
-//!     .expect("atlas has room");
-//! let resolved = ResolvedArtifact::new(
-//!     request.request().key().clone(),
-//!     request.class(),
-//!     slot,
-//! );
+//! let mut cache = AtlasCache::new(Budget::new(8, 8), pages, router);
+//! cache.begin_epoch(Epoch::new(1));
+//! cache
+//!     .queue(request.clone())
+//!     .expect("atlas keys should use stable metadata");
+//!
+//! let report = cache
+//!     .process_queued(|_| 1)
+//!     .expect("room for one glyph");
+//! let resolved = report
+//!     .processed()
+//!     .iter()
+//!     .find_map(|processed| match processed {
+//!         cachet_atlas::AtlasProcessedRequest::Resolved { artifact, .. } => Some(artifact),
+//!         _ => None,
+//!     })
+//!     .expect("glyph resolves");
 //!
 //! assert_eq!(resolved.class().get(), 1);
 //! assert_eq!(resolved.page(), page);
@@ -94,13 +97,28 @@
 //!   request
 //! - [`AtlasPageRouter`]: atlas-side routing policy that maps classes to
 //!   compatible storage pages
+//! - [`AtlasCache`]: the small atlas composition layer over residency,
+//!   routing, and storage
 //! - [`ResolvedArtifact`]: the resolved atlas placement for a logical key
+//! - stable atlas metadata: one logical key should not be queued or reused
+//!   with conflicting [`AtlasClass`] or [`ArtifactSize`]
 //!
 //! Resolve metadata:
 //!
 //! `ResolvedArtifact` is the atlas workload's resolve metadata: the answer you
 //! hand back after residency has been admitted, a compatible page has been
 //! chosen, and storage has assigned a physical slot.
+//!
+//! Controller flow:
+//!
+//! [`AtlasCache`] is the intended calm integration path for atlas workloads:
+//! queue [`ArtifactRequest`] values, process them once per epoch, and receive
+//! atlas-facing outcomes plus any resolved or evicted artifacts back.
+//! [`AtlasCache::stats`] and [`AtlasCache::page_stats`] then expose enough
+//! diagnostics to explain page spill, occupancy, and fragmentation pressure.
+//! [`AtlasCache::queue`] also validates that one logical key maps to stable
+//! atlas metadata; if a caller needs a different class or size, that
+//! distinction should be reflected in the key itself.
 //!
 //! Atlas classes vs atlas pages:
 //!
@@ -124,14 +142,21 @@
 //! - [`AtlasPageRouter`] only chooses among compatible pages; it does not own
 //!   storage pages or allocation policy
 //! - page routing is still explicit composition, not a hidden global service
+//! - if one logical key needs different atlas metadata, model that distinction
+//!   in the key rather than queuing contradictory requests
 
 extern crate alloc;
 
+mod controller;
 mod key;
 mod request;
 mod resolve;
 mod routing;
 
+pub use controller::{
+    AtlasAllocationError, AtlasCache, AtlasCacheStats, AtlasProcessedRequest,
+    AtlasProcessingReport, AtlasQueueError,
+};
 pub use key::{ArtifactSize, AtlasClass};
 pub use request::ArtifactRequest;
 pub use resolve::ResolvedArtifact;

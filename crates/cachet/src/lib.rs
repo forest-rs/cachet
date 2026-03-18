@@ -50,27 +50,28 @@
 //!     0,
 //! );
 //!
-//! let mut tracker = residency::ResidencyTracker::new(residency::Budget::new(8, 8));
-//! tracker.begin_epoch(residency::Epoch::new(1));
-//! tracker.request(request.request().clone());
-//! let _handle = tracker.admit(request.request(), 1).expect("room for one glyph");
-//!
 //! let mut pages = storage::RectAtlasSet::new();
 //! let page = pages.add_page(64, 64).expect("page id fits");
 //! let mut router = atlas::AtlasPageRouter::new();
 //! assert!(router.register_page(request.class(), page));
 //!
-//! let page = router
-//!     .best_page_for(&request, &pages)
-//!     .expect("one compatible page");
-//! let slot = pages
-//!     .allocate_in(page, request.size().width(), request.size().height())
-//!     .expect("space in the atlas");
-//! let resolved = atlas::ResolvedArtifact::new(
-//!     request.request().key().clone(),
-//!     request.class(),
-//!     slot,
-//! );
+//! let mut cache = atlas::AtlasCache::new(residency::Budget::new(8, 8), pages, router);
+//! cache.begin_epoch(residency::Epoch::new(1));
+//! cache
+//!     .queue(request.clone())
+//!     .expect("atlas keys should use stable metadata");
+//!
+//! let report = cache
+//!     .process_queued(|_| 1)
+//!     .expect("room for one glyph");
+//! let resolved = report
+//!     .processed()
+//!     .iter()
+//!     .find_map(|processed| match processed {
+//!         atlas::AtlasProcessedRequest::Resolved { artifact, .. } => Some(artifact),
+//!         _ => None,
+//!     })
+//!     .expect("glyph resolves");
 //!
 //! assert_eq!(resolved.page(), page);
 //! assert_eq!(resolved.rect().width(), 16);
@@ -142,6 +143,12 @@
 //! [`residency::ResidencyBindings`] helper and the `image_resource_demo`
 //! example show that pattern without introducing atlas or tile vocabulary into
 //! the kernel.
+//!
+//! Atlas-style consumers now also have a calmer composition path through
+//! [`atlas::AtlasCache`], with [`atlas::AtlasCacheStats`] exposing queue and
+//! page-pressure diagnostics. One atlas key is also expected to carry stable
+//! atlas metadata, so [`atlas::AtlasCache::queue`] rejects contradictory class
+//! or size information for the same key.
 //!
 //! This keeps one use case's nouns from taking over the others:
 //!
