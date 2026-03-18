@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cachet",
+    "crates/cachet_atlas",
+    "crates/cachet_residency",
+    "crates/cachet_storage",
+    "crates/cachet_surface",
+    "examples/glyph_cache_demo",
+    "examples/image_resource_demo",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/forest-rs/cachet"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+allow_attributes = "warn"
+doc_markdown = "warn"
+
+[workspace.dependencies]
+cachet = { path = "crates/cachet" }
+cachet_atlas = { path = "crates/cachet_atlas" }
+cachet_residency = { path = "crates/cachet_residency" }
+cachet_storage = { path = "crates/cachet_storage" }
+cachet_surface = { path = "crates/cachet_surface" }
+
+hashbrown = { default-features = false, features = ["default-hasher"], version = "0.16.1" }

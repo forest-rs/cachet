@@ -1,0 +1,17 @@
+[package]
+name = "cachet_atlas"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Atlas-oriented request and resolve metadata for Cachet"
+keywords = ["cache", "atlas", "glyph", "rendering"]
+categories = ["rendering"]
+
+[dependencies]
+cachet_residency.workspace = true
+cachet_storage.workspace = true
+
+[lints]
+workspace = true

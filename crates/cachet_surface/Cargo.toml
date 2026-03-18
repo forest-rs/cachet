@@ -1,0 +1,17 @@
+[package]
+name = "cachet_surface"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Surface-tile planning and resolve metadata for Cachet"
+keywords = ["cache", "surface", "tiling", "rendering"]
+categories = ["rendering"]
+
+[dependencies]
+cachet_residency.workspace = true
+cachet_storage.workspace = true
+
+[lints]
+workspace = true

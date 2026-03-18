@@ -1,0 +1,13 @@
+[package]
+name = "cachet_storage"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Physical slot allocators for Cachet residency backends"
+keywords = ["allocator", "cache", "no_std", "rendering"]
+categories = ["rendering", "no-std"]
+
+[lints]
+workspace = true

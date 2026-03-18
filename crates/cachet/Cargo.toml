@@ -1,0 +1,19 @@
+[package]
+name = "cachet"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Facade crate and rustdoc landing page for the Cachet residency family"
+keywords = ["cache", "residency", "atlas", "tiling"]
+categories = ["rendering", "no-std"]
+
+[dependencies]
+cachet_atlas.workspace = true
+cachet_residency.workspace = true
+cachet_storage.workspace = true
+cachet_surface.workspace = true
+
+[lints]
+workspace = true

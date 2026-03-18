@@ -1,0 +1,29 @@
+# cachet
+
+Facade crate and rustdoc landing page for the Cachet residency family.
+
+## Role
+
+This crate does not hide the underlying crate boundaries. It exists to give
+future users one calm entry point that explains how the pieces fit together and
+to re-export the four core crates:
+
+- `cachet::residency`
+- `cachet::storage`
+- `cachet::atlas`
+- `cachet::surface`
+
+## Start Here
+
+Choose the workload shape first:
+
+- glyph, icon, or image-patch cache: start with `cachet::atlas`
+- tiled map, document, or canvas cache: start with `cachet::surface`
+- dense resident-slot registry: start with `cachet::residency`
+
+## Notes
+
+- This is still an exploratory sketch.
+- The facade is a guide, not an abstraction barrier.
+- Runnable examples live in `examples/`.
+- Cross-crate composition is covered by `crates/cachet/tests/residency_flow.rs`.

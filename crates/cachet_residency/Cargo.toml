@@ -1,0 +1,16 @@
+[package]
+name = "cachet_residency"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core residency policy, budgeting, and eviction primitives for Cachet"
+keywords = ["cache", "residency", "no_std", "rendering"]
+categories = ["rendering", "no-std"]
+
+[dependencies]
+hashbrown.workspace = true
+
+[lints]
+workspace = true
