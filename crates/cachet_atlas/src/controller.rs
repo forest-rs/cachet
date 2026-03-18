@@ -247,7 +247,6 @@ impl<K> AtlasCache<K> {
     pub fn begin_epoch(&mut self, epoch: Epoch) {
         self.tracker.begin_epoch(epoch);
     }
-
     /// Returns summary diagnostics for the atlas cache.
     #[must_use]
     pub fn stats(&self) -> AtlasCacheStats {
@@ -570,6 +569,8 @@ mod tests {
             .expect("initial requests should process");
 
         assert_eq!(first.evicted().len(), 0);
+        assert_eq!(cache.stats().pending(), 0);
+        assert_eq!(cache.stats().residents(), 2);
         let first_resolved = first
             .processed()
             .iter()
@@ -607,8 +608,11 @@ mod tests {
         assert_eq!(resolved_c.page(), page1);
         assert_eq!(resolved_c.rect(), second.evicted()[0].rect());
 
-        let stats = cache.pages().stats();
-        assert_eq!(stats, RectAtlasSetStats::new(2, 2, 0));
+        let stats = cache.stats();
+        assert_eq!(stats.pending(), 0);
+        assert_eq!(stats.residents(), 2);
+        let pages = stats.pages();
+        assert_eq!(pages, RectAtlasSetStats::new(2, 2, 0));
         assert!(cache.resolved_by_key(&GlyphKey("A")).is_some());
         assert!(cache.resolved_by_key(&GlyphKey("B")).is_none());
         assert!(cache.resolved_by_key(&GlyphKey("C")).is_some());

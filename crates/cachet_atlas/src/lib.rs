@@ -34,6 +34,8 @@
 //!   compatible storage pages
 //! - [`AtlasCache`] is the small composition layer that wires residency,
 //!   routing, and storage together
+//! - [`AtlasCacheStats`] is the controller-facing summary for queue and page
+//!   pressure
 //! - [`ResolvedArtifact`] is what you hand back to callers after storage has
 //!   assigned a slot
 //! - one logical key is expected to have one stable [`AtlasClass`] and
@@ -99,6 +101,7 @@
 //!   compatible storage pages
 //! - [`AtlasCache`]: the small atlas composition layer over residency,
 //!   routing, and storage
+//! - [`AtlasCacheStats`]: summary diagnostics for queue and page pressure
 //! - [`ResolvedArtifact`]: the resolved atlas placement for a logical key
 //! - stable atlas metadata: one logical key should not be queued or reused
 //!   with conflicting [`AtlasClass`] or [`ArtifactSize`]
