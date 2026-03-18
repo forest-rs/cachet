@@ -37,7 +37,10 @@ fn main() {
 
     let glyphs = demo_glyphs();
     let mut tracker = residency::ResidencyTracker::new(residency::Budget::new(8, 8));
-    let mut atlas_page = storage::RectAtlas::new(64, 64);
+    let mut pages = storage::RectAtlasSet::new();
+    let page = pages.add_page(64, 64).expect("demo page id should fit");
+    let mut router = atlas::AtlasPageRouter::new();
+    assert!(router.register_page(atlas::AtlasClass::new(1), page));
     let mut resolved: Vec<(
         residency::ResidencyHandle,
         atlas::ResolvedArtifact<GlyphKey>,
@@ -64,14 +67,18 @@ fn main() {
             .expect("demo budget should accept each glyph");
         println!("  admitted as resident handle {}", handle.get());
 
-        println!("phase 3: assign a physical rect in the atlas page");
-        let slot = atlas_page
-            .allocate(request.size().width(), request.size().height())
+        println!("phase 3: choose a compatible page and assign a physical rect");
+        let page = router
+            .best_page_for(&request, &pages)
+            .expect("demo router should find one compatible page");
+        let slot = pages
+            .allocate_in(page, request.size().width(), request.size().height())
             .expect("demo atlas should have room");
         let artifact =
             atlas::ResolvedArtifact::new(request.request().key().clone(), request.class(), slot);
         println!(
-            "  packed at ({}, {}) with extent {}x{}",
+            "  packed on page {} at ({}, {}) with extent {}x{}",
+            artifact.page().get(),
             artifact.rect().x(),
             artifact.rect().y(),
             artifact.rect().width(),
@@ -84,9 +91,10 @@ fn main() {
     println!("phase 4: hand resolved metadata back to the caller");
     for (handle, artifact) in &resolved {
         println!(
-            "  glyph '{}' -> handle {} -> atlas rect ({}, {}) {}x{}",
+            "  glyph '{}' -> handle {} -> page {} -> atlas rect ({}, {}) {}x{}",
             artifact.key().glyph,
             handle.get(),
+            artifact.page().get(),
             artifact.rect().x(),
             artifact.rect().y(),
             artifact.rect().width(),

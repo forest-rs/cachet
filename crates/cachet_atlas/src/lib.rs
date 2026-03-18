@@ -22,14 +22,16 @@
 //!
 //! 1. describe an artifact with [`ArtifactRequest`]
 //! 2. admit its logical residency through `cachet_residency`
-//! 3. allocate a physical rect through `cachet_storage` and expose a
-//!    [`ResolvedArtifact`]
+//! 3. route to a compatible page, allocate a physical rect through
+//!    `cachet_storage`, and expose a [`ResolvedArtifact`]
 //!
 //! Read the atlas names literally:
 //!
 //! - [`ArtifactRequest`] is the thing you pass onward into the residency layer
 //! - [`AtlasClass`] and [`ArtifactSize`] are the extra atlas inputs needed to
 //!   build that request
+//! - [`AtlasPageRouter`] is the atlas-side routing policy for choosing among
+//!   compatible storage pages
 //! - [`ResolvedArtifact`] is what you hand back to callers after storage has
 //!   assigned a slot
 //!
@@ -37,9 +39,11 @@
 //! and then exposes the resolved placement.
 //!
 //! ```
-//! use cachet_atlas::{ArtifactRequest, ArtifactSize, AtlasClass, ResolvedArtifact};
+//! use cachet_atlas::{
+//!     ArtifactRequest, ArtifactSize, AtlasClass, AtlasPageRouter, ResolvedArtifact,
+//! };
 //! use cachet_residency::{Budget, Epoch, Priority, ResidencyTracker};
-//! use cachet_storage::RectAtlas;
+//! use cachet_storage::RectAtlasSet;
 //!
 //! #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 //! struct GlyphKey(&'static str);
@@ -57,9 +61,16 @@
 //! tracker.request(request.request().clone());
 //! let _handle = tracker.admit(request.request(), 1).expect("room for one glyph");
 //!
-//! let mut atlas = RectAtlas::new(64, 64);
-//! let slot = atlas
-//!     .allocate(request.size().width(), request.size().height())
+//! let mut pages = RectAtlasSet::new();
+//! let page = pages.add_page(64, 64).expect("page id fits");
+//! let mut router = AtlasPageRouter::new();
+//! assert!(router.register_page(AtlasClass::new(1), page));
+//!
+//! let page = router
+//!     .best_page_for(&request, &pages)
+//!     .expect("one compatible page");
+//! let slot = pages
+//!     .allocate_in(page, request.size().width(), request.size().height())
 //!     .expect("atlas has room");
 //! let resolved = ResolvedArtifact::new(
 //!     request.request().key().clone(),
@@ -68,6 +79,7 @@
 //! );
 //!
 //! assert_eq!(resolved.class().get(), 1);
+//! assert_eq!(resolved.page(), page);
 //! assert_eq!(resolved.rect().height(), 20);
 //! ```
 //!
@@ -80,20 +92,22 @@
 //! - [`ArtifactSize`]: the requested artifact extent in atlas pixels
 //! - [`ArtifactRequest`]: the atlas-facing wrapper around a generic residency
 //!   request
+//! - [`AtlasPageRouter`]: atlas-side routing policy that maps classes to
+//!   compatible storage pages
 //! - [`ResolvedArtifact`]: the resolved atlas placement for a logical key
 //!
 //! Resolve metadata:
 //!
 //! `ResolvedArtifact` is the atlas workload's resolve metadata: the answer you
-//! hand back after residency has been admitted and storage has assigned a
-//! physical slot.
+//! hand back after residency has been admitted, a compatible page has been
+//! chosen, and storage has assigned a physical slot.
 //!
 //! Atlas classes vs atlas pages:
 //!
 //! [`AtlasClass`] is not a concrete page id. It describes which artifacts can
-//! share the same atlas family or packing regime. A future multi-page atlas may
-//! route one class across several pages, or keep several classes apart even
-//! when they all live in the same backend.
+//! share the same atlas family or packing regime. One class may map to several
+//! compatible pages, and one backend may host several classes without turning
+//! the class into a storage page identifier.
 //!
 //! Extension points:
 //!
@@ -107,19 +121,18 @@
 //! - this crate does not decide how the atlas is uploaded or bound to shaders
 //! - a missing artifact is still a caller concern; this crate only models the
 //!   request and resolved placement vocabulary
-//! - [`AtlasClass`] is a compatibility bucket today, not a built-in page id or
-//!   multi-page routing mechanism; the first slice still uses a single-page
-//!   allocator
-// TODO(cachet): Add a multi-page atlas story. Use AtlasClass and related
-// workload metadata for page selection without pulling allocation policy up
-// into cachet_atlas itself.
+//! - [`AtlasPageRouter`] only chooses among compatible pages; it does not own
+//!   storage pages or allocation policy
+//! - page routing is still explicit composition, not a hidden global service
 
 extern crate alloc;
 
 mod key;
 mod request;
 mod resolve;
+mod routing;
 
 pub use key::{ArtifactSize, AtlasClass};
 pub use request::ArtifactRequest;
 pub use resolve::ResolvedArtifact;
+pub use routing::{AtlasPageAssignment, AtlasPageRouter};

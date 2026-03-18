@@ -12,7 +12,10 @@ struct GlyphKey(&'static str);
 fn atlas_flow_reclaims_space_after_eviction() {
     let mut tracker = residency::ResidencyTracker::new(residency::Budget::new(2, 2));
     let mut bindings = residency::ResidencyBindings::new();
-    let mut atlas_page = storage::RectAtlas::new(16, 16);
+    let mut pages = storage::RectAtlasSet::new();
+    let page = pages.add_page(16, 16).expect("page id fits");
+    let mut router = atlas::AtlasPageRouter::new();
+    assert!(router.register_page(atlas::AtlasClass::new(1), page));
 
     tracker.begin_epoch(residency::Epoch::new(1));
     tracker.request(glyph_request("A", 80).request().clone());
@@ -21,11 +24,12 @@ fn atlas_flow_reclaims_space_after_eviction() {
     let first_report = tracker
         .process_requests(|_| 1)
         .expect("first wave should admit");
-    let mut resolved = resolve_admitted(&first_report, &mut bindings, &mut atlas_page);
+    let mut resolved = resolve_admitted(&first_report, &mut bindings, &router, &mut pages);
 
     assert_eq!(resolved.len(), 2);
     assert_eq!(bindings.len(), 2);
     assert_eq!(resolved[0].class().get(), 1);
+    assert_eq!(resolved[0].page(), page);
 
     tracker.begin_epoch(residency::Epoch::new(2));
     let b_handle = tracker
@@ -45,12 +49,12 @@ fn atlas_flow_reclaims_space_after_eviction() {
     let freed_allocation = bindings
         .unbind(evicted.handle())
         .expect("evicted glyph should have a bound allocation");
-    let freed_rect = atlas_page
+    let freed_rect = pages
         .free(freed_allocation)
         .expect("live atlas allocation can be freed");
     resolved.retain(|artifact| artifact.key() != &GlyphKey("B"));
 
-    let mut reused = resolve_admitted(&second_report, &mut bindings, &mut atlas_page);
+    let mut reused = resolve_admitted(&second_report, &mut bindings, &router, &mut pages);
     assert_eq!(reused.len(), 1);
     assert_eq!(reused[0].key(), &GlyphKey("C"));
     assert_eq!(reused[0].rect(), freed_rect);
@@ -64,8 +68,9 @@ fn atlas_flow_reclaims_space_after_eviction() {
 
 fn resolve_admitted(
     report: &residency::RequestProcessingReport<GlyphKey>,
-    bindings: &mut residency::ResidencyBindings<storage::AllocationId>,
-    atlas_page: &mut storage::RectAtlas,
+    bindings: &mut residency::ResidencyBindings<storage::PagedAtlasSlot>,
+    router: &atlas::AtlasPageRouter,
+    pages: &mut storage::RectAtlasSet,
 ) -> Vec<atlas::ResolvedArtifact<GlyphKey>> {
     let mut resolved = Vec::new();
     for processed in report.processed() {
@@ -73,10 +78,20 @@ fn resolve_admitted(
             request, handle, ..
         } = processed
         {
-            let slot = atlas_page
-                .allocate(6, 4)
+            let atlas_request = atlas::ArtifactRequest::new(
+                request.key().clone(),
+                atlas::AtlasClass::new(1),
+                atlas::ArtifactSize::new(6, 4),
+                request.priority(),
+                request.generation(),
+            );
+            let page = router
+                .best_page_for(&atlas_request, pages)
+                .expect("integration router should find one compatible page");
+            let slot = pages
+                .allocate_in(page, 6, 4)
                 .expect("integration atlas page should have room");
-            let _ = bindings.bind(*handle, slot.allocation());
+            let _ = bindings.bind(*handle, slot);
             resolved.push(atlas::ResolvedArtifact::new(
                 request.key().clone(),
                 atlas::AtlasClass::new(1),

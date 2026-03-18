@@ -55,9 +55,16 @@
 //! tracker.request(request.request().clone());
 //! let _handle = tracker.admit(request.request(), 1).expect("room for one glyph");
 //!
-//! let mut atlas_page = storage::RectAtlas::new(64, 64);
-//! let slot = atlas_page
-//!     .allocate(request.size().width(), request.size().height())
+//! let mut pages = storage::RectAtlasSet::new();
+//! let page = pages.add_page(64, 64).expect("page id fits");
+//! let mut router = atlas::AtlasPageRouter::new();
+//! assert!(router.register_page(request.class(), page));
+//!
+//! let page = router
+//!     .best_page_for(&request, &pages)
+//!     .expect("one compatible page");
+//! let slot = pages
+//!     .allocate_in(page, request.size().width(), request.size().height())
 //!     .expect("space in the atlas");
 //! let resolved = atlas::ResolvedArtifact::new(
 //!     request.request().key().clone(),
@@ -65,6 +72,7 @@
 //!     slot,
 //! );
 //!
+//! assert_eq!(resolved.page(), page);
 //! assert_eq!(resolved.rect().width(), 16);
 //! ```
 //!
