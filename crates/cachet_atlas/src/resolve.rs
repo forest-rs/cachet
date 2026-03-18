@@ -1,7 +1,7 @@
 // Copyright 2026 the Cachet Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use cachet_storage::{AtlasRect, AtlasSlot};
+use cachet_storage::{AtlasPageId, AtlasRect, PagedAtlasSlot};
 
 use crate::AtlasClass;
 
@@ -14,13 +14,13 @@ use crate::AtlasClass;
 pub struct ResolvedArtifact<K> {
     key: K,
     class: AtlasClass,
-    slot: AtlasSlot,
+    slot: PagedAtlasSlot,
 }
 
 impl<K> ResolvedArtifact<K> {
     /// Creates a resolved atlas record for a resident artifact.
     #[must_use]
-    pub const fn new(key: K, class: AtlasClass, slot: AtlasSlot) -> Self {
+    pub const fn new(key: K, class: AtlasClass, slot: PagedAtlasSlot) -> Self {
         Self { key, class, slot }
     }
 
@@ -36,9 +36,15 @@ impl<K> ResolvedArtifact<K> {
         self.class
     }
 
+    /// Returns the atlas page chosen for this artifact.
+    #[must_use]
+    pub const fn page(&self) -> AtlasPageId {
+        self.slot.page()
+    }
+
     /// Returns the atlas slot assigned by `cachet_storage`.
     #[must_use]
-    pub const fn slot(&self) -> AtlasSlot {
+    pub const fn slot(&self) -> PagedAtlasSlot {
         self.slot
     }
 

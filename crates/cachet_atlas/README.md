@@ -11,6 +11,7 @@ It owns:
 
 - artifact request vocabulary
 - atlas compatibility classes
+- atlas-side routing across compatible storage pages
 - artifact pixel sizes
 - atlas-facing resolved metadata
 
@@ -22,10 +23,12 @@ binding policy.
 - `ArtifactRequest<K>`: atlas-facing request wrapper passed onward into
   `cachet_residency`
 - `AtlasClass`: compatibility bucket for atlas content
+- `AtlasPageRouter`: atlas-side routing policy over storage pages
 - `ArtifactSize`: requested extent in atlas pixels
 - `ResolvedArtifact<K>`: metadata handed back once storage assigned a slot
 
 ## Notes
 
-- `AtlasClass` is not a built-in multi-page routing mechanism yet.
-- The first slice still assumes a single-page allocator from `cachet_storage`.
+- `AtlasClass` is a compatibility bucket, not a concrete storage page id.
+- `AtlasPageRouter` chooses among compatible `cachet_storage` pages without
+  turning page routing into storage policy.
