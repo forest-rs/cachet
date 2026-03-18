@@ -17,7 +17,8 @@ to re-export the four core crates:
 
 Choose the workload shape first:
 
-- glyph, icon, or image-patch cache: start with `cachet::atlas`
+- glyph, icon, or image-patch cache: start with `cachet::atlas`, especially
+  `cachet::atlas::AtlasCache` once you want a calm queue/process/resolve path
 - tiled map, document, or canvas cache: start with `cachet::surface`
 - dense resident-slot registry: start with `cachet::residency`
 
@@ -25,5 +26,6 @@ Choose the workload shape first:
 
 - This is still an exploratory sketch.
 - The facade is a guide, not an abstraction barrier.
-- Runnable examples live in `examples/`.
+- Runnable examples live in `examples/`, including a multi-page glyph cache
+  churn story.
 - Cross-crate composition is covered by `crates/cachet/tests/residency_flow.rs`.

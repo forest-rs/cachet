@@ -30,6 +30,7 @@ fn atlas_cache_reclaims_space_across_multiple_pages() {
     let first = cache
         .process_queued(|_| 1)
         .expect("first wave should resolve");
+    assert_eq!(cache.stats().residents(), 2);
 
     let first_resolved = first
         .processed()
@@ -71,7 +72,7 @@ fn atlas_cache_reclaims_space_across_multiple_pages() {
     assert!(cache.resolved_by_key(&GlyphKey("A")).is_some());
     assert!(cache.resolved_by_key(&GlyphKey("B")).is_none());
     assert!(cache.resolved_by_key(&GlyphKey("C")).is_some());
-    assert_eq!(cache.pages().stats().allocated(), 2);
+    assert_eq!(cache.stats().pages().allocated(), 2);
 }
 
 fn glyph_request(name: &'static str, priority: u32) -> atlas::ArtifactRequest<GlyphKey> {

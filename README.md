@@ -26,11 +26,13 @@ Current workspace members:
 The goal is still documentation-led: the crates exist to prove the seam and
 first slice, not to freeze a broad public API too early. The sketch includes
 both atlas and surface adapters so the competing workload pressures stay
-visible early. Atlas is still the first detailed demo adapter, and the
-residency core is also intended to help registry-style resource tables and
-other non-atlas consumers.
+visible early. Atlas is now the more-developed demo path, with
+`cachet_atlas::AtlasCache` providing the intended composition over residency,
+page routing, and storage. The residency core is also intended to help
+registry-style resource tables and other non-atlas consumers.
 
 The facade crate in `crates/cachet/` is the top-level rustdoc landing page for
 future users. The example crates under `examples/` provide runnable stories for
-glyph caching and image resource management. Cross-crate composition is also
-covered by an integration test in `crates/cachet/tests/residency_flow.rs`.
+glyph caching and image resource management, including a multi-page glyph cache
+churn story. Cross-crate composition is also covered by an integration test in
+`crates/cachet/tests/residency_flow.rs`.
