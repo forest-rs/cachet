@@ -5,101 +5,73 @@
 
 use cachet::{atlas, residency, storage};
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct GlyphKey(&'static str);
 
 #[test]
-fn atlas_flow_reclaims_space_after_eviction() {
-    let mut tracker = residency::ResidencyTracker::new(residency::Budget::new(2, 2));
-    let mut bindings = residency::ResidencyBindings::new();
+fn atlas_cache_reclaims_space_across_multiple_pages() {
     let mut pages = storage::RectAtlasSet::new();
-    let page = pages.add_page(16, 16).expect("page id fits");
+    let page0 = pages.add_page(6, 4).expect("page id fits");
+    let page1 = pages.add_page(6, 4).expect("page id fits");
+
     let mut router = atlas::AtlasPageRouter::new();
-    assert!(router.register_page(atlas::AtlasClass::new(1), page));
+    assert!(router.register_page(atlas::AtlasClass::new(1), page0));
+    assert!(router.register_page(atlas::AtlasClass::new(1), page1));
 
-    tracker.begin_epoch(residency::Epoch::new(1));
-    tracker.request(glyph_request("A", 80).request().clone());
-    tracker.request(glyph_request("B", 70).request().clone());
+    let mut cache = atlas::AtlasCache::new(residency::Budget::new(2, 2), pages, router);
+    cache.begin_epoch(residency::Epoch::new(1));
+    cache
+        .queue(glyph_request("A", 80))
+        .expect("metadata should be consistent");
+    cache
+        .queue(glyph_request("B", 70))
+        .expect("metadata should be consistent");
 
-    let first_report = tracker
-        .process_requests(|_| 1)
-        .expect("first wave should admit");
-    let mut resolved = resolve_admitted(&first_report, &mut bindings, &router, &mut pages);
+    let first = cache
+        .process_queued(|_| 1)
+        .expect("first wave should resolve");
 
-    assert_eq!(resolved.len(), 2);
-    assert_eq!(bindings.len(), 2);
-    assert_eq!(resolved[0].class().get(), 1);
-    assert_eq!(resolved[0].page(), page);
+    let first_resolved = first
+        .processed()
+        .iter()
+        .filter_map(|processed| match processed {
+            atlas::AtlasProcessedRequest::Resolved { artifact, .. } => Some(*artifact),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(first_resolved.len(), 2);
+    assert_ne!(first_resolved[0].page(), first_resolved[1].page());
 
-    tracker.begin_epoch(residency::Epoch::new(2));
-    let b_handle = tracker
-        .resident_handle_for_key(&GlyphKey("B"))
-        .expect("glyph B should be resident");
-    assert!(tracker.mark_used(b_handle));
+    cache.begin_epoch(residency::Epoch::new(2));
+    cache
+        .queue(glyph_request("C", 90))
+        .expect("metadata should be consistent");
+    let second = cache
+        .process_queued(|_| 1)
+        .expect("second wave should resolve");
 
-    tracker.request(glyph_request("C", 90).request().clone());
-    let second_report = tracker
-        .process_requests(|_| 1)
-        .expect("second wave should admit after eviction");
+    assert_eq!(second.evicted().len(), 1);
+    assert_eq!(second.evicted()[0].key(), &GlyphKey("B"));
 
-    assert_eq!(second_report.evicted().len(), 1);
-    let evicted = &second_report.evicted()[0];
-    assert_eq!(evicted.key(), &GlyphKey("B"));
+    let resolved_c = second
+        .processed()
+        .iter()
+        .find_map(|processed| match processed {
+            atlas::AtlasProcessedRequest::Resolved { artifact, .. }
+                if artifact.key() == &GlyphKey("C") =>
+            {
+                Some(*artifact)
+            }
+            _ => None,
+        })
+        .expect("glyph C should resolve");
+    assert_eq!(resolved_c.page(), page1);
+    assert_eq!(resolved_c.rect(), second.evicted()[0].rect());
 
-    let freed_allocation = bindings
-        .unbind(evicted.handle())
-        .expect("evicted glyph should have a bound allocation");
-    let freed_rect = pages
-        .free(freed_allocation)
-        .expect("live atlas allocation can be freed");
-    resolved.retain(|artifact| artifact.key() != &GlyphKey("B"));
-
-    let mut reused = resolve_admitted(&second_report, &mut bindings, &router, &mut pages);
-    assert_eq!(reused.len(), 1);
-    assert_eq!(reused[0].key(), &GlyphKey("C"));
-    assert_eq!(reused[0].rect(), freed_rect);
-
-    resolved.append(&mut reused);
-    assert_eq!(resolved.len(), 2);
-    assert!(tracker.resident_by_key(&GlyphKey("A")).is_some());
-    assert!(tracker.resident_by_key(&GlyphKey("B")).is_none());
-    assert!(tracker.resident_by_key(&GlyphKey("C")).is_some());
-}
-
-fn resolve_admitted(
-    report: &residency::RequestProcessingReport<GlyphKey>,
-    bindings: &mut residency::ResidencyBindings<storage::PagedAtlasSlot>,
-    router: &atlas::AtlasPageRouter,
-    pages: &mut storage::RectAtlasSet,
-) -> Vec<atlas::ResolvedArtifact<GlyphKey>> {
-    let mut resolved = Vec::new();
-    for processed in report.processed() {
-        if let residency::ProcessedRequest::Admitted {
-            request, handle, ..
-        } = processed
-        {
-            let atlas_request = atlas::ArtifactRequest::new(
-                request.key().clone(),
-                atlas::AtlasClass::new(1),
-                atlas::ArtifactSize::new(6, 4),
-                request.priority(),
-                request.generation(),
-            );
-            let page = router
-                .best_page_for(&atlas_request, pages)
-                .expect("integration router should find one compatible page");
-            let slot = pages
-                .allocate_in(page, 6, 4)
-                .expect("integration atlas page should have room");
-            let _ = bindings.bind(*handle, slot);
-            resolved.push(atlas::ResolvedArtifact::new(
-                request.key().clone(),
-                atlas::AtlasClass::new(1),
-                slot,
-            ));
-        }
-    }
-    resolved
+    assert!(cache.resolved_by_key(&GlyphKey("A")).is_some());
+    assert!(cache.resolved_by_key(&GlyphKey("B")).is_none());
+    assert!(cache.resolved_by_key(&GlyphKey("C")).is_some());
+    assert_eq!(cache.pages().stats().allocated(), 2);
 }
 
 fn glyph_request(name: &'static str, priority: u32) -> atlas::ArtifactRequest<GlyphKey> {

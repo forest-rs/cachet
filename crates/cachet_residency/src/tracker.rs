@@ -543,6 +543,16 @@ where
         }
     }
 
+    /// Removes the resident for a specific handle.
+    ///
+    /// This is a direct caller-driven removal, distinct from invalidation or
+    /// budget-driven eviction. It is useful when a higher-level integration
+    /// needs to roll back an admitted resident because some external resource
+    /// step, such as physical placement, could not be completed.
+    pub fn remove(&mut self, handle: ResidencyHandle) -> Option<ResidentEntry<K>> {
+        self.remove_handle(handle)
+    }
+
     fn prepare_request(&mut self, request: &Request<K>) -> PreparedRequest<K> {
         let Some(handle) = self.resident_handle_for_key(request.key()) else {
             return PreparedRequest::Fresh;

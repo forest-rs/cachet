@@ -5,10 +5,11 @@
 //!
 //! This example shows the normal atlas flow:
 //!
-//! 1. describe glyphs with `cachet::atlas`
-//! 2. track their logical residency with `cachet::residency`
-//! 3. assign rects with `cachet::storage`
-//! 4. expose resolved atlas metadata back to the caller
+//! 1. describe a bounded hot set of glyphs with `cachet::atlas`
+//! 2. process them through `cachet::atlas::AtlasCache`
+//! 3. watch one glyph spill to a second page, then get evicted and reused
+//! 4. inspect the resolved atlas metadata and page stats returned by the
+//!    controller
 //!
 //! Run it with:
 //!
@@ -20,7 +21,9 @@
 //!
 //! - the glyph request vocabulary stays in `cachet::atlas`
 //! - the residency kernel knows nothing about glyphs or atlas UVs
-//! - the rect atlas owns physical placement, not policy
+//! - the atlas cache controller composes routing and storage without erasing
+//!   their boundary
+//! - page stats make the spill and reuse story visible
 
 use cachet::{atlas, residency, storage};
 
@@ -35,21 +38,18 @@ fn main() {
     println!("================");
     println!();
 
-    let glyphs = demo_glyphs();
-    let mut tracker = residency::ResidencyTracker::new(residency::Budget::new(8, 8));
     let mut pages = storage::RectAtlasSet::new();
-    let page = pages.add_page(64, 64).expect("demo page id should fit");
+    let page0 = pages.add_page(12, 16).expect("demo page id should fit");
+    let page1 = pages.add_page(12, 16).expect("demo page id should fit");
     let mut router = atlas::AtlasPageRouter::new();
-    assert!(router.register_page(atlas::AtlasClass::new(1), page));
-    let mut resolved: Vec<(
-        residency::ResidencyHandle,
-        atlas::ResolvedArtifact<GlyphKey>,
-    )> = Vec::new();
+    assert!(router.register_page(atlas::AtlasClass::new(1), page0));
+    assert!(router.register_page(atlas::AtlasClass::new(1), page1));
+    let mut cache = atlas::AtlasCache::new(residency::Budget::new(2, 2), pages, router);
 
-    println!("phase 1: start a frame-like epoch and describe the logical work");
-    tracker.begin_epoch(residency::Epoch::new(1));
+    println!("phase 1: fill a two-glyph hot set across two small pages");
+    cache.begin_epoch(residency::Epoch::new(1));
 
-    for (index, key) in glyphs.into_iter().enumerate() {
+    for (index, key) in initial_glyphs().into_iter().enumerate() {
         let request = build_glyph_request(key, index);
         println!(
             "  request glyph '{}' from font '{}' as class {} at {}x{} pixels",
@@ -59,41 +59,47 @@ fn main() {
             request.size().width(),
             request.size().height()
         );
-        tracker.request(request.request().clone());
-
-        println!("phase 2: admit the glyph into bounded logical residency");
-        let handle = tracker
-            .admit(request.request(), 1)
-            .expect("demo budget should accept each glyph");
-        println!("  admitted as resident handle {}", handle.get());
-
-        println!("phase 3: choose a compatible page and assign a physical rect");
-        let page = router
-            .best_page_for(&request, &pages)
-            .expect("demo router should find one compatible page");
-        let slot = pages
-            .allocate_in(page, request.size().width(), request.size().height())
-            .expect("demo atlas should have room");
-        let artifact =
-            atlas::ResolvedArtifact::new(request.request().key().clone(), request.class(), slot);
-        println!(
-            "  packed on page {} at ({}, {}) with extent {}x{}",
-            artifact.page().get(),
-            artifact.rect().x(),
-            artifact.rect().y(),
-            artifact.rect().width(),
-            artifact.rect().height()
-        );
-        println!();
-        resolved.push((handle, artifact));
+        cache
+            .queue(request)
+            .expect("glyph keys should use stable atlas metadata");
     }
 
-    println!("phase 4: hand resolved metadata back to the caller");
-    for (handle, artifact) in &resolved {
+    let first = cache
+        .process_queued(|_| 1)
+        .expect("demo budget should accept each glyph");
+    print_report("  resolved", first.processed());
+    print_stats(&cache, &[page0, page1]);
+    println!();
+
+    println!("phase 2: request a higher-priority glyph and force churn");
+    cache.begin_epoch(residency::Epoch::new(2));
+    let request = build_priority_glyph(
+        GlyphKey {
+            font: "demo-sans",
+            glyph: 'C',
+        },
+        90,
+    );
+    println!(
+        "  request glyph '{}' from font '{}' as class {} at {}x{} pixels",
+        request.request().key().glyph,
+        request.request().key().font,
+        request.class().get(),
+        request.size().width(),
+        request.size().height()
+    );
+    cache
+        .queue(request)
+        .expect("glyph keys should use stable atlas metadata");
+
+    let second = cache
+        .process_queued(|_| 1)
+        .expect("demo budget should accept the replacement glyph");
+    print_report("  processed", second.processed());
+    for artifact in second.evicted() {
         println!(
-            "  glyph '{}' -> handle {} -> page {} -> atlas rect ({}, {}) {}x{}",
+            "  evicted glyph '{}' from page {} rect ({}, {}) {}x{}",
             artifact.key().glyph,
-            handle.get(),
             artifact.page().get(),
             artifact.rect().x(),
             artifact.rect().y(),
@@ -101,8 +107,31 @@ fn main() {
             artifact.rect().height()
         );
     }
+    print_stats(&cache, &[page0, page1]);
+    println!();
 
-    let summary = tracker.end_epoch();
+    println!("phase 3: inspect the live glyphs after churn");
+    for glyph in ['A', 'B', 'C'] {
+        let key = GlyphKey {
+            font: "demo-sans",
+            glyph,
+        };
+        if let Some(artifact) = cache.resolved_by_key(&key) {
+            println!(
+                "  glyph '{}' is live on page {} at ({}, {}) {}x{}",
+                glyph,
+                artifact.page().get(),
+                artifact.rect().x(),
+                artifact.rect().y(),
+                artifact.rect().width(),
+                artifact.rect().height()
+            );
+        } else {
+            println!("  glyph '{}' is not resident", glyph);
+        }
+    }
+
+    let summary = cache.tracker().end_epoch();
     println!();
     println!("epoch summary");
     println!(
@@ -114,7 +143,7 @@ fn main() {
     );
 }
 
-fn demo_glyphs() -> [GlyphKey; 3] {
+fn initial_glyphs() -> [GlyphKey; 2] {
     [
         GlyphKey {
             font: "demo-sans",
@@ -124,19 +153,83 @@ fn demo_glyphs() -> [GlyphKey; 3] {
             font: "demo-sans",
             glyph: 'B',
         },
-        GlyphKey {
-            font: "demo-sans",
-            glyph: 'C',
-        },
     ]
 }
 
 fn build_glyph_request(key: GlyphKey, index: usize) -> atlas::ArtifactRequest<GlyphKey> {
+    build_priority_glyph(key, 100 - index as u32)
+}
+
+fn build_priority_glyph(key: GlyphKey, priority: u32) -> atlas::ArtifactRequest<GlyphKey> {
     atlas::ArtifactRequest::new(
         key,
         atlas::AtlasClass::new(1),
         atlas::ArtifactSize::new(12, 16),
-        residency::Priority::new(0, 100 - index as u32),
+        residency::Priority::new(0, priority),
         0,
     )
+}
+
+fn print_report(label: &str, processed: &[atlas::AtlasProcessedRequest<GlyphKey>]) {
+    for processed in processed {
+        match processed {
+            atlas::AtlasProcessedRequest::Resolved {
+                handle, artifact, ..
+            }
+            | atlas::AtlasProcessedRequest::AlreadyResident {
+                handle, artifact, ..
+            } => {
+                println!(
+                    "{} glyph '{}' -> handle {} -> page {} -> atlas rect ({}, {}) {}x{}",
+                    label,
+                    artifact.key().glyph,
+                    handle.get(),
+                    artifact.page().get(),
+                    artifact.rect().x(),
+                    artifact.rect().y(),
+                    artifact.rect().width(),
+                    artifact.rect().height()
+                );
+            }
+            atlas::AtlasProcessedRequest::Rejected { request, cost, .. } => {
+                println!(
+                    "{} glyph '{}' rejected by residency at cost {}",
+                    label,
+                    request.request().key().glyph,
+                    cost
+                );
+            }
+            atlas::AtlasProcessedRequest::AllocationRejected { request, error, .. } => {
+                println!(
+                    "{} glyph '{}' rejected by storage with {:?}",
+                    label,
+                    request.request().key().glyph,
+                    error
+                );
+            }
+        }
+    }
+}
+
+fn print_stats(cache: &atlas::AtlasCache<GlyphKey>, pages: &[storage::AtlasPageId]) {
+    let stats = cache.stats();
+    println!(
+        "  cache stats: pending {}, residents {}, pages {}, allocated {}, free regions {}",
+        stats.pending(),
+        stats.residents(),
+        stats.pages().pages(),
+        stats.pages().allocated(),
+        stats.pages().free_regions()
+    );
+    for page in pages {
+        let stats = cache.page_stats(*page).expect("page stats exist");
+        println!(
+            "    page {} -> allocated {}, free regions {}, next cursor ({}, {})",
+            page.get(),
+            stats.allocated(),
+            stats.free_regions(),
+            stats.next_x(),
+            stats.next_y()
+        );
+    }
 }

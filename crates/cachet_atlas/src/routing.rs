@@ -75,18 +75,19 @@ impl AtlasPageRouter {
             .map(|assignment| assignment.page)
     }
 
-    /// Chooses the best currently compatible page for an artifact request.
+    /// Returns compatible pages for an artifact request in preferred order.
     ///
     /// The current policy prefers the least-allocated compatible page that can
     /// represent the requested size. Ties fall back to fewer tracked free
     /// regions and then page id for determinism.
     #[must_use]
-    pub fn best_page_for<K>(
+    pub fn candidate_pages_for<K>(
         &self,
         request: &ArtifactRequest<K>,
         pages: &RectAtlasSet,
-    ) -> Option<AtlasPageId> {
-        self.pages_for(request.class())
+    ) -> Vec<AtlasPageId> {
+        let mut candidates: Vec<_> = self
+            .pages_for(request.class())
             .filter_map(|page| {
                 let stats = pages.page_stats(page)?;
                 if request.size().width() > stats.width()
@@ -96,8 +97,20 @@ impl AtlasPageRouter {
                 }
                 Some((stats.allocated(), stats.free_regions(), page))
             })
-            .min_by_key(|(allocated, free_regions, page)| (*allocated, *free_regions, *page))
-            .map(|(_, _, page)| page)
+            .collect();
+        candidates
+            .sort_by_key(|(allocated, free_regions, page)| (*allocated, *free_regions, *page));
+        candidates.into_iter().map(|(_, _, page)| page).collect()
+    }
+
+    /// Chooses the best currently compatible page for an artifact request.
+    #[must_use]
+    pub fn best_page_for<K>(
+        &self,
+        request: &ArtifactRequest<K>,
+        pages: &RectAtlasSet,
+    ) -> Option<AtlasPageId> {
+        self.candidate_pages_for(request, pages).into_iter().next()
     }
 }
 
