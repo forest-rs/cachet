@@ -26,6 +26,10 @@ binding policy.
 - `AtlasClass`: compatibility bucket for atlas content
 - `AtlasPageRouter`: atlas-side routing policy over storage pages
 - `AtlasCache<K>`: calmer atlas composition path over the lower layers
+- `AtlasProcessingBatch<K, S>`: reusable batch context for `process_queued`
+- `AtlasProcessingOutput<K>`: reusable Vec-backed output sink for collected
+  results
+- `AtlasProcessingSink<K>`: streamed output interface carried by a batch
 - `AtlasCacheStats`: queue and page-pressure summary for the controller
 - `AtlasQueueError`: queue-time validation failure for contradictory atlas
   metadata on one key
@@ -39,6 +43,8 @@ binding policy.
   turning page routing into storage policy.
 - `AtlasCache` is the intended integration path once you want queue ->
   process -> resolve -> evict behavior in one place.
+- `process_queued()` takes explicit caller-owned batch state; reuse the same
+  batch across epochs for steady-state work.
 - One logical key is expected to have stable `AtlasClass` and `ArtifactSize`.
   If those need to differ, model that distinction in the key instead of
   queueing contradictory requests.

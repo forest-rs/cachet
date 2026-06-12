@@ -16,6 +16,7 @@ What it demonstrates:
   `cachet::atlas::ResolvedArtifact`
 - showing page spill and reuse with `AtlasCache::stats()` and
   `AtlasCache::page_stats()`
+- explicit reusable batch/output state passed to `process_queued()`
 
 Run it with:
 

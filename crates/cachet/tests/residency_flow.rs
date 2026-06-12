@@ -19,6 +19,7 @@ fn atlas_cache_reclaims_space_across_multiple_pages() {
     assert!(router.register_page(atlas::AtlasClass::new(1), page1));
 
     let mut cache = atlas::AtlasCache::new(residency::Budget::new(2, 2), pages, router);
+    let mut batch = atlas::AtlasProcessingBatch::new(atlas::AtlasProcessingOutput::new());
     cache.begin_epoch(residency::Epoch::new(1));
     cache
         .queue(glyph_request("A", 80))
@@ -27,12 +28,13 @@ fn atlas_cache_reclaims_space_across_multiple_pages() {
         .queue(glyph_request("B", 70))
         .expect("metadata should be consistent");
 
-    let first = cache
-        .process_queued(|_| 1)
+    cache
+        .process_queued(&mut batch, |_| 1)
         .expect("first wave should resolve");
     assert_eq!(cache.stats().residents(), 2);
 
-    let first_resolved = first
+    let first_resolved = batch
+        .sink()
         .processed()
         .iter()
         .filter_map(|processed| match processed {
@@ -47,14 +49,16 @@ fn atlas_cache_reclaims_space_across_multiple_pages() {
     cache
         .queue(glyph_request("C", 90))
         .expect("metadata should be consistent");
-    let second = cache
-        .process_queued(|_| 1)
+    batch.sink_mut().clear();
+    cache
+        .process_queued(&mut batch, |_| 1)
         .expect("second wave should resolve");
 
-    assert_eq!(second.evicted().len(), 1);
-    assert_eq!(second.evicted()[0].key(), &GlyphKey("B"));
+    assert_eq!(batch.sink().evicted().len(), 1);
+    assert_eq!(batch.sink().evicted()[0].key(), &GlyphKey("B"));
 
-    let resolved_c = second
+    let resolved_c = batch
+        .sink()
         .processed()
         .iter()
         .find_map(|processed| match processed {
@@ -67,7 +71,7 @@ fn atlas_cache_reclaims_space_across_multiple_pages() {
         })
         .expect("glyph C should resolve");
     assert_eq!(resolved_c.page(), page1);
-    assert_eq!(resolved_c.rect(), second.evicted()[0].rect());
+    assert_eq!(resolved_c.rect(), batch.sink().evicted()[0].rect());
 
     assert!(cache.resolved_by_key(&GlyphKey("A")).is_some());
     assert!(cache.resolved_by_key(&GlyphKey("B")).is_none());

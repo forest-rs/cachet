@@ -34,6 +34,11 @@
 //!   compatible storage pages
 //! - [`AtlasCache`] is the small composition layer that wires residency,
 //!   routing, and storage together
+//! - [`AtlasProcessingBatch`] is passed to
+//!   [`AtlasCache::process_queued`] when the caller wants a reusable
+//!   lower-allocation batch context
+//! - [`AtlasProcessingOutput`] is the reusable Vec-backed output sink for
+//!   callers that want collected results
 //! - [`AtlasCacheStats`] is the controller-facing summary for queue and page
 //!   pressure
 //! - [`ResolvedArtifact`] is what you hand back to callers after storage has
@@ -45,7 +50,10 @@
 //! and then exposes the resolved placement.
 //!
 //! ```
-//! use cachet_atlas::{ArtifactRequest, ArtifactSize, AtlasCache, AtlasClass, AtlasPageRouter};
+//! use cachet_atlas::{
+//!     ArtifactRequest, ArtifactSize, AtlasCache, AtlasClass, AtlasPageRouter,
+//!     AtlasProcessingBatch, AtlasProcessingOutput,
+//! };
 //! use cachet_residency::{Budget, Epoch, Priority};
 //! use cachet_storage::RectAtlasSet;
 //!
@@ -71,10 +79,12 @@
 //!     .queue(request.clone())
 //!     .expect("atlas keys should use stable metadata");
 //!
-//! let report = cache
-//!     .process_queued(|_| 1)
+//! let mut batch = AtlasProcessingBatch::new(AtlasProcessingOutput::new());
+//! cache
+//!     .process_queued(&mut batch, |_| 1)
 //!     .expect("room for one glyph");
-//! let resolved = report
+//! let resolved = batch
+//!     .sink()
 //!     .processed()
 //!     .iter()
 //!     .find_map(|processed| match processed {
@@ -116,9 +126,11 @@
 //!
 //! [`AtlasCache`] is the intended calm integration path for atlas workloads:
 //! queue [`ArtifactRequest`] values, process them once per epoch, and receive
-//! atlas-facing outcomes plus any resolved or evicted artifacts back.
+//! atlas-facing outcomes plus any resolved or evicted artifacts through a
+//! caller-owned [`AtlasProcessingBatch`].
 //! [`AtlasCache::stats`] and [`AtlasCache::page_stats`] then expose enough
 //! diagnostics to explain page spill, occupancy, and fragmentation pressure.
+//! [`AtlasCache::process_queued`] always takes explicit reusable batch storage.
 //! [`AtlasCache::queue`] also validates that one logical key maps to stable
 //! atlas metadata; if a caller needs a different class or size, that
 //! distinction should be reflected in the key itself.
@@ -157,8 +169,8 @@ mod resolve;
 mod routing;
 
 pub use controller::{
-    AtlasAllocationError, AtlasCache, AtlasCacheStats, AtlasProcessedRequest,
-    AtlasProcessingReport, AtlasQueueError,
+    AtlasAllocationError, AtlasCache, AtlasCacheStats, AtlasProcessedRequest, AtlasProcessingBatch,
+    AtlasProcessingOutput, AtlasProcessingSink, AtlasQueueError,
 };
 pub use key::{ArtifactSize, AtlasClass};
 pub use request::ArtifactRequest;

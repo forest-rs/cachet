@@ -42,8 +42,12 @@
 //! - [`ResidentEntry`] is returned by lookup and eviction methods
 //! - [`ResidencyBindings`] is the helper for binding handles to caller-owned
 //!   metadata
-//! - [`RequestProcessingReport`] is returned by
-//!   [`ResidencyTracker::process_requests`]
+//! - [`RequestProcessingBatch`] is passed to
+//!   [`ResidencyTracker::process_requests`] as reusable request scratch
+//! - [`RequestProcessingOutput`] is the reusable Vec-backed output sink for
+//!   callers that want collected results
+//! - [`RequestProcessingSink`] is the streamed output mechanism carried by
+//!   [`RequestProcessingBatch`]
 //! - [`EpochSummary`] is returned by [`ResidencyTracker::end_epoch`]
 //!
 //! ```
@@ -97,7 +101,8 @@
 //! Request lifecycle:
 //!
 //! - queue a [`Request`] with [`ResidencyTracker::request`]
-//! - admit it with [`ResidencyTracker::admit`] or
+//! - admit it with [`ResidencyTracker::admit`], or process queued work through
+//!   a reusable [`RequestProcessingBatch`] with
 //!   [`ResidencyTracker::process_requests`]
 //! - track the resulting resident through its [`ResidencyHandle`]
 //! - optionally bind that handle to workload-specific metadata through
@@ -139,6 +144,15 @@
 //! - surface planners such as `cachet_surface`
 //! - dense resident-slot registries and other resource tables
 //!
+//! Batch-processing shapes:
+//!
+//! - [`ResidencyTracker::process_requests`] always takes caller-owned batch
+//!   state
+//! - [`RequestProcessingOutput`] is a reusable collecting sink for callers that
+//!   want Vec-backed results
+//! - callers should reuse the same batch and sink storage across epochs for
+//!   steady-state work
+//!
 //! Extension points:
 //!
 //! - richer priority policies can stay outside the kernel and still emit
@@ -176,5 +190,6 @@ pub use priority::Priority;
 pub use request::Request;
 pub use summary::EpochSummary;
 pub use tracker::{
-    AdmissionError, ProcessedRequest, RequestProcessingReport, ResidencyTracker, ResidentEntry,
+    AdmissionError, ProcessedRequest, RequestProcessingBatch, RequestProcessingOutput,
+    RequestProcessingSink, ResidencyTracker, ResidentEntry,
 };

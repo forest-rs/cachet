@@ -80,27 +80,24 @@ impl AtlasPageRouter {
     /// The current policy prefers the least-allocated compatible page that can
     /// represent the requested size. Ties fall back to fewer tracked free
     /// regions and then page id for determinism.
-    #[must_use]
-    pub fn candidate_pages_for<K>(
+    pub fn candidate_pages<K>(
         &self,
         request: &ArtifactRequest<K>,
         pages: &RectAtlasSet,
-    ) -> Vec<AtlasPageId> {
-        let mut candidates: Vec<_> = self
-            .pages_for(request.class())
-            .filter_map(|page| {
-                let stats = pages.page_stats(page)?;
-                if request.size().width() > stats.width()
-                    || request.size().height() > stats.height()
-                {
-                    return None;
-                }
-                Some((stats.allocated(), stats.free_regions(), page))
+        out: &mut Vec<AtlasPageId>,
+    ) {
+        out.clear();
+        out.extend(self.pages_for(request.class()).filter(|page| {
+            pages.page_stats(*page).is_some_and(|stats| {
+                request.size().width() <= stats.width() && request.size().height() <= stats.height()
             })
-            .collect();
-        candidates
-            .sort_by_key(|(allocated, free_regions, page)| (*allocated, *free_regions, *page));
-        candidates.into_iter().map(|(_, _, page)| page).collect()
+        }));
+        out.sort_unstable_by_key(|page| {
+            let stats = pages
+                .page_stats(*page)
+                .expect("candidate pages come from registered storage pages");
+            (stats.allocated(), stats.free_regions(), *page)
+        });
     }
 
     /// Chooses the best currently compatible page for an artifact request.
@@ -110,7 +107,19 @@ impl AtlasPageRouter {
         request: &ArtifactRequest<K>,
         pages: &RectAtlasSet,
     ) -> Option<AtlasPageId> {
-        self.candidate_pages_for(request, pages).into_iter().next()
+        self.pages_for(request.class())
+            .filter(|page| {
+                pages.page_stats(*page).is_some_and(|stats| {
+                    request.size().width() <= stats.width()
+                        && request.size().height() <= stats.height()
+                })
+            })
+            .min_by_key(|page| {
+                let stats = pages
+                    .page_stats(*page)
+                    .expect("candidate pages come from registered storage pages");
+                (stats.allocated(), stats.free_regions(), *page)
+            })
     }
 }
 
@@ -159,5 +168,39 @@ mod tests {
         let compatible: Vec<_> = router.pages_for(AtlasClass::new(1)).collect();
         assert_eq!(compatible, vec![page3, page4]);
         assert_ne!(compatible[0].get(), 1);
+    }
+
+    #[test]
+    fn candidate_pages_reuses_caller_output_buffer() {
+        let mut pages = RectAtlasSet::new();
+        let page0 = pages.add_page(16, 16).expect("page id fits");
+        let page1 = pages.add_page(16, 16).expect("page id fits");
+        let page2 = pages.add_page(2, 2).expect("page id fits");
+
+        let _ = pages.allocate_in(page0, 4, 4).expect("page 0 has room");
+
+        let mut router = AtlasPageRouter::new();
+        assert!(router.register_page(AtlasClass::new(7), page0));
+        assert!(router.register_page(AtlasClass::new(7), page1));
+        assert!(router.register_page(AtlasClass::new(7), page2));
+
+        let request = ArtifactRequest::new(
+            "glyph:A",
+            AtlasClass::new(7),
+            ArtifactSize::new(4, 4),
+            Priority::new(0, 10),
+            0,
+        );
+
+        let mut out = Vec::with_capacity(2);
+        let original_capacity = out.capacity();
+
+        router.candidate_pages(&request, &pages, &mut out);
+        assert_eq!(out, vec![page1, page0]);
+        assert_eq!(out.capacity(), original_capacity);
+
+        router.candidate_pages(&request, &pages, &mut out);
+        assert_eq!(out, vec![page1, page0]);
+        assert_eq!(out.capacity(), original_capacity);
     }
 }

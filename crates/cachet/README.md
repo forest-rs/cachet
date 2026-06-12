@@ -26,6 +26,8 @@ Choose the workload shape first:
 
 - This is still an exploratory sketch.
 - The facade is a guide, not an abstraction barrier.
+- Batch processing takes explicit reusable batch/output state for steady-state
+  work.
 - Runnable examples live in `examples/`, including a multi-page glyph cache
   churn story.
 - Cross-crate composition is covered by `crates/cachet/tests/residency_flow.rs`.

@@ -45,6 +45,7 @@ fn main() {
     assert!(router.register_page(atlas::AtlasClass::new(1), page0));
     assert!(router.register_page(atlas::AtlasClass::new(1), page1));
     let mut cache = atlas::AtlasCache::new(residency::Budget::new(2, 2), pages, router);
+    let mut batch = atlas::AtlasProcessingBatch::new(atlas::AtlasProcessingOutput::new());
 
     println!("phase 1: fill a two-glyph hot set across two small pages");
     cache.begin_epoch(residency::Epoch::new(1));
@@ -64,10 +65,10 @@ fn main() {
             .expect("glyph keys should use stable atlas metadata");
     }
 
-    let first = cache
-        .process_queued(|_| 1)
+    cache
+        .process_queued(&mut batch, |_| 1)
         .expect("demo budget should accept each glyph");
-    print_report("  resolved", first.processed());
+    print_report("  resolved", batch.sink().processed());
     print_stats(&cache, &[page0, page1]);
     println!();
 
@@ -92,11 +93,12 @@ fn main() {
         .queue(request)
         .expect("glyph keys should use stable atlas metadata");
 
-    let second = cache
-        .process_queued(|_| 1)
+    batch.sink_mut().clear();
+    cache
+        .process_queued(&mut batch, |_| 1)
         .expect("demo budget should accept the replacement glyph");
-    print_report("  processed", second.processed());
-    for artifact in second.evicted() {
+    print_report("  processed", batch.sink().processed());
+    for artifact in batch.sink().evicted() {
         println!(
             "  evicted glyph '{}' from page {} rect ({}, {}) {}x{}",
             artifact.key().glyph,

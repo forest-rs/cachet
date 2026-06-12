@@ -31,6 +31,10 @@ visible early. Atlas is now the more-developed demo path, with
 page routing, and storage. The residency core is also intended to help
 registry-style resource tables and other non-atlas consumers.
 
+Slice 3 has started to make the runtime story more explicit as well: the
+residency and atlas layers now expose reusable batch-processing contexts for
+steady-state work with caller-owned scratch and output storage.
+
 The facade crate in `crates/cachet/` is the top-level rustdoc landing page for
 future users. The example crates under `examples/` provide runnable stories for
 glyph caching and image resource management, including a multi-page glyph cache

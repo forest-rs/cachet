@@ -23,7 +23,11 @@ resources, or background execution.
 - `Request<K>`: passed to `request` and `admit`
 - `ResidencyHandle`: returned by `admit`
 - `ResidencyBindings<V>`: caller-owned glue from handles to resolved metadata
-- `RequestProcessingReport<K>`: returned by `process_requests`
+- `RequestProcessingBatch<K, S>`: passed to `process_requests` when the
+  caller wants a reusable batch context
+- `RequestProcessingOutput<K>`: reusable Vec-backed output sink for collected
+  results
+- `RequestProcessingSink<K>`: streamed output interface carried by a batch
 
 ## Good Fits
 
@@ -36,6 +40,8 @@ resources, or background execution.
 - The core is `no_std` plus `alloc`.
 - Batch admission currently uses priority-aware eviction with recency as a
   tiebreaker.
+- `process_requests()` takes explicit caller-owned batch state; reuse the same
+  batch across epochs for steady-state work.
 - Handle lookup currently uses a sparse side table keyed by minted handle id,
   so memory growth follows lifetime admissions rather than current resident
   count.

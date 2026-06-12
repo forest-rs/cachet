@@ -185,24 +185,125 @@ impl<K> ProcessedRequest<K> {
     }
 }
 
-/// Report returned by [`ResidencyTracker::process_requests`].
+/// Caller-owned sink for streamed batch-processing outcomes.
+///
+/// Callers can implement this trait to receive processed outcomes and evictions
+/// directly while reusing their own output storage across batches.
+pub trait RequestProcessingSink<K> {
+    /// Receives one outcome for a queued request.
+    fn processed(&mut self, processed: ProcessedRequest<K>);
+
+    /// Receives one resident evicted to make room during processing.
+    fn evicted(&mut self, evicted: ResidentEntry<K>);
+}
+
+/// Caller-owned batch context passed to [`ResidencyTracker::process_requests`].
+///
+/// The batch owns reusable request scratch plus a caller-chosen sink for
+/// streamed outcomes. Reusing one batch across epochs lets callers avoid
+/// allocating owned report vectors on the hot path.
+#[derive(Clone, Debug)]
+pub struct RequestProcessingBatch<K, S> {
+    queued: Vec<Request<K>>,
+    sink: S,
+}
+
+impl<K, S> RequestProcessingBatch<K, S> {
+    /// Creates a request-processing batch from a caller-owned sink.
+    #[must_use]
+    pub fn new(sink: S) -> Self {
+        Self {
+            queued: Vec::new(),
+            sink,
+        }
+    }
+
+    /// Creates a batch with preallocated request scratch capacity.
+    #[must_use]
+    pub fn with_capacity(request_capacity: usize, sink: S) -> Self {
+        Self {
+            queued: Vec::with_capacity(request_capacity),
+            sink,
+        }
+    }
+
+    /// Returns the sink carried by this batch.
+    #[must_use]
+    pub const fn sink(&self) -> &S {
+        &self.sink
+    }
+
+    /// Returns the sink carried by this batch mutably.
+    #[must_use]
+    pub fn sink_mut(&mut self) -> &mut S {
+        &mut self.sink
+    }
+
+    /// Returns the sink, consuming the batch.
+    #[must_use]
+    pub fn into_sink(self) -> S {
+        self.sink
+    }
+
+    fn capture_requests(&mut self, requests: &mut Vec<Request<K>>) {
+        // Swap the tracker's current request buffer into the batch so the
+        // batch can sort and drain it in place. The tracker receives the
+        // batch's previous scratch buffer back, which preserves capacity for
+        // the next round of `request()` calls instead of dropping it.
+        self.queued.clear();
+        mem::swap(&mut self.queued, requests);
+    }
+}
+
+/// Reusable output sink for residency batch processing.
 ///
 /// The two result streams mean different things:
 ///
 /// - `processed` reports what happened to each queued request
 /// - `evicted` reports unrelated residents removed to make room under budget
 ///   pressure
+///
+/// This type owns `Vec` storage, but it is meant to be kept inside a
+/// [`RequestProcessingBatch`] and reused across batches. Call [`Self::clear`]
+/// before processing if the previous results are no longer needed.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RequestProcessingReport<K> {
+pub struct RequestProcessingOutput<K> {
     processed: Vec<ProcessedRequest<K>>,
     evicted: Vec<ResidentEntry<K>>,
 }
 
-impl<K> RequestProcessingReport<K> {
-    /// Creates a request-processing report.
+impl<K> RequestProcessingOutput<K> {
+    /// Creates empty request-processing output.
     #[must_use]
-    pub const fn new(processed: Vec<ProcessedRequest<K>>, evicted: Vec<ResidentEntry<K>>) -> Self {
+    pub const fn new() -> Self {
+        Self {
+            processed: Vec::new(),
+            evicted: Vec::new(),
+        }
+    }
+
+    /// Creates output with preallocated processed-result capacity.
+    #[must_use]
+    pub fn with_capacity(processed_capacity: usize) -> Self {
+        Self {
+            processed: Vec::with_capacity(processed_capacity),
+            evicted: Vec::new(),
+        }
+    }
+
+    /// Creates output from existing vectors.
+    #[must_use]
+    pub const fn from_parts(
+        processed: Vec<ProcessedRequest<K>>,
+        evicted: Vec<ResidentEntry<K>>,
+    ) -> Self {
         Self { processed, evicted }
+    }
+
+    /// Clears previous results while preserving allocated capacity.
+    pub fn clear(&mut self) {
+        self.processed.clear();
+        self.evicted.clear();
     }
 
     /// Returns one outcome per processed queued request.
@@ -215,6 +316,28 @@ impl<K> RequestProcessingReport<K> {
     #[must_use]
     pub fn evicted(&self) -> &[ResidentEntry<K>] {
         &self.evicted
+    }
+
+    /// Returns the owned result vectors.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<ProcessedRequest<K>>, Vec<ResidentEntry<K>>) {
+        (self.processed, self.evicted)
+    }
+}
+
+impl<K> Default for RequestProcessingOutput<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K> RequestProcessingSink<K> for RequestProcessingOutput<K> {
+    fn processed(&mut self, processed: ProcessedRequest<K>) {
+        self.processed.push(processed);
+    }
+
+    fn evicted(&mut self, evicted: ResidentEntry<K>) {
+        self.evicted.push(evicted);
     }
 }
 
@@ -278,10 +401,13 @@ enum PreparedRequest<K> {
 /// );
 /// ```
 ///
-/// Batch processing looks like this:
+/// Reusable batch processing with collected output looks like this:
 ///
 /// ```
-/// use cachet_residency::{Budget, Epoch, Priority, Request, ResidencyTracker};
+/// use cachet_residency::{
+///     Budget, Epoch, Priority, Request, RequestProcessingBatch, RequestProcessingOutput,
+///     ResidencyTracker,
+/// };
 ///
 /// let mut tracker = ResidencyTracker::new(Budget::new(3, 2));
 /// tracker.begin_epoch(Epoch::new(1));
@@ -289,20 +415,21 @@ enum PreparedRequest<K> {
 /// tracker.request(Request::new("hero", Priority::new(1, 10), 0));
 /// tracker.request(Request::new("prefetch", Priority::new(0, 10), 0));
 ///
-/// let report = tracker
-///     .process_requests(|request| match *request.key() {
+/// let mut batch = RequestProcessingBatch::new(RequestProcessingOutput::new());
+/// tracker
+///     .process_requests(&mut batch, |request| match *request.key() {
 ///         "hero" => 2,
 ///         "prefetch" => 2,
 ///         _ => 1,
 ///     })
 ///     .expect("valid admissions");
 ///
-/// assert_eq!(report.processed().len(), 2);
-/// assert!(report.processed()[0].handle().is_some());
-/// assert!(!report.processed()[0].crossed_soft_limit());
-/// assert!(report.evicted().is_empty());
-/// assert_eq!(report.processed()[1].request().key(), &"prefetch");
-/// assert!(report.processed()[1].handle().is_none());
+/// assert_eq!(batch.sink().processed().len(), 2);
+/// assert!(batch.sink().processed()[0].handle().is_some());
+/// assert!(!batch.sink().processed()[0].crossed_soft_limit());
+/// assert!(batch.sink().evicted().is_empty());
+/// assert_eq!(batch.sink().processed()[1].request().key(), &"prefetch");
+/// assert!(batch.sink().processed()[1].handle().is_none());
 /// ```
 #[derive(Clone, Debug)]
 pub struct ResidencyTracker<K> {
@@ -645,31 +772,38 @@ where
         }
     }
 
-    /// Processes queued requests in descending priority order.
+    /// Processes queued requests using a caller-owned batch context.
     ///
     /// The caller supplies a cost model for each queued request. Requests with
     /// resident keys are deduplicated automatically, stale generations displace
     /// older residents, and lower-priority residents are evicted as needed to
     /// make room. Among evictable residents with the same priority, older
     /// residents are preferred for eviction.
-    pub fn process_requests<F>(
+    ///
+    /// This method reorders queued requests internally by priority, but it
+    /// reuses the batch's request scratch and streams outcomes into the batch's
+    /// sink instead of allocating owned report vectors for every call.
+    pub fn process_requests<F, S>(
         &mut self,
+        batch: &mut RequestProcessingBatch<K, S>,
         mut cost_for: F,
-    ) -> Result<RequestProcessingReport<K>, AdmissionError>
+    ) -> Result<(), AdmissionError>
     where
         F: FnMut(&Request<K>) -> u32,
+        S: RequestProcessingSink<K>,
     {
-        let mut queued = mem::take(&mut self.requests);
-        queued.sort_by_key(|request| Reverse(request.priority()));
+        batch.capture_requests(&mut self.requests);
+        batch
+            .queued
+            .sort_unstable_by_key(|request| Reverse(request.priority()));
 
-        let mut processed = Vec::with_capacity(queued.len());
-        let mut evicted = Vec::new();
-
-        for request in queued {
+        for request in batch.queued.drain(..) {
             let displaced = match self.prepare_request(&request) {
                 PreparedRequest::Fresh => None,
                 PreparedRequest::AlreadyResident { handle } => {
-                    processed.push(ProcessedRequest::AlreadyResident { request, handle });
+                    batch
+                        .sink
+                        .processed(ProcessedRequest::AlreadyResident { request, handle });
                     continue;
                 }
                 PreparedRequest::Displaced { resident } => Some(resident),
@@ -677,7 +811,7 @@ where
 
             let cost = cost_for(&request);
             if cost > self.budget.capacity() {
-                processed.push(ProcessedRequest::Rejected {
+                batch.sink.processed(ProcessedRequest::Rejected {
                     request,
                     cost,
                     displaced,
@@ -689,13 +823,13 @@ where
                 let Some(resident) = self.evict_for_request(request.priority()) else {
                     break;
                 };
-                evicted.push(resident);
+                batch.sink.evicted(resident);
             }
 
             if self.can_admit(cost) {
                 let handle = self.admit_fresh(&request, cost)?;
                 let used_cost_after = self.used_cost;
-                processed.push(ProcessedRequest::Admitted {
+                batch.sink.processed(ProcessedRequest::Admitted {
                     request,
                     handle,
                     used_cost_after,
@@ -703,7 +837,7 @@ where
                     displaced,
                 });
             } else {
-                processed.push(ProcessedRequest::Rejected {
+                batch.sink.processed(ProcessedRequest::Rejected {
                     request,
                     cost,
                     displaced,
@@ -711,7 +845,7 @@ where
             }
         }
 
-        Ok(RequestProcessingReport::new(processed, evicted))
+        Ok(())
     }
 
     fn admit_fresh(
@@ -776,6 +910,53 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestSink<K> {
+        processed: Vec<ProcessedRequest<K>>,
+        evicted: Vec<ResidentEntry<K>>,
+    }
+
+    impl<K> TestSink<K> {
+        fn new() -> Self {
+            Self {
+                processed: Vec::new(),
+                evicted: Vec::new(),
+            }
+        }
+    }
+
+    impl<K> RequestProcessingSink<K> for TestSink<K> {
+        fn processed(&mut self, processed: ProcessedRequest<K>) {
+            self.processed.push(processed);
+        }
+
+        fn evicted(&mut self, evicted: ResidentEntry<K>) {
+            self.evicted.push(evicted);
+        }
+    }
+
+    fn process_requests_output<K, F>(
+        tracker: &mut ResidencyTracker<K>,
+        cost_for: F,
+    ) -> Result<RequestProcessingOutput<K>, AdmissionError>
+    where
+        K: Clone + Eq + core::hash::Hash,
+        F: FnMut(&Request<K>) -> u32,
+    {
+        let mut batch = RequestProcessingBatch::new(RequestProcessingOutput::new());
+        tracker.process_requests(&mut batch, cost_for)?;
+        Ok(batch.into_sink())
+    }
+
+    fn process_requests_for_test<F>(
+        mut tracker: ResidencyTracker<&'static str>,
+        cost_for: F,
+    ) -> RequestProcessingOutput<&'static str>
+    where
+        F: FnMut(&Request<&'static str>) -> u32,
+    {
+        process_requests_output(&mut tracker, cost_for).expect("batch processing should complete")
+    }
 
     #[test]
     fn lru_eviction_prefers_oldest_touch() {
@@ -915,9 +1096,8 @@ mod tests {
         assert!(tracker.mark_used(right_handle));
 
         tracker.request(Request::new("new", Priority::new(1, 90), 0));
-        let report = tracker
-            .process_requests(|_| 1)
-            .expect("handle space should remain");
+        let report =
+            process_requests_output(&mut tracker, |_| 1).expect("handle space should remain");
 
         assert_eq!(report.evicted().len(), 1);
         assert_eq!(report.evicted()[0].key(), &"right");
@@ -956,9 +1136,8 @@ mod tests {
 
         tracker.begin_epoch(Epoch::new(2));
         tracker.request(Request::new("low", Priority::new(0, 40), 0));
-        let report = tracker
-            .process_requests(|_| 1)
-            .expect("batch processing should complete");
+        let report =
+            process_requests_output(&mut tracker, |_| 1).expect("batch processing should complete");
 
         assert!(report.evicted().is_empty());
         assert!(matches!(
@@ -983,8 +1162,7 @@ mod tests {
         tracker.request(Request::new("second", Priority::new(1, 10), 0));
         tracker.request(Request::new("third", Priority::new(1, 5), 0));
 
-        let report = tracker
-            .process_requests(|_| 1)
+        let report = process_requests_output(&mut tracker, |_| 1)
             .expect("all three should fit in hard capacity");
 
         assert_eq!(report.processed().len(), 3);
@@ -994,5 +1172,132 @@ mod tests {
         assert!(!report.processed()[1].crossed_soft_limit());
         assert_eq!(report.processed()[2].used_cost_after(), Some(3));
         assert!(report.processed()[2].crossed_soft_limit());
+    }
+
+    #[test]
+    fn process_requests_handles_already_resident_work() {
+        let mut tracker = ResidencyTracker::new(Budget::new(2, 2));
+        tracker.begin_epoch(Epoch::new(1));
+
+        let resident = Request::new("resident", Priority::new(1, 90), 0);
+        let handle = tracker.admit(&resident, 1).expect("resident fits");
+
+        tracker.begin_epoch(Epoch::new(2));
+        tracker.request(resident);
+
+        let report = process_requests_for_test(tracker, |_| 1);
+        assert!(report.evicted().is_empty());
+        assert!(matches!(
+            &report.processed()[0],
+            ProcessedRequest::AlreadyResident {
+                request,
+                handle: reused
+            } if request.key() == &"resident" && *reused == handle
+        ));
+    }
+
+    #[test]
+    fn process_requests_handles_displaced_work() {
+        let mut tracker = ResidencyTracker::new(Budget::new(2, 2));
+        tracker.begin_epoch(Epoch::new(1));
+
+        let stale = Request::new("glyph", Priority::new(1, 80), 0);
+        let stale_handle = tracker.admit(&stale, 1).expect("stale resident fits");
+
+        tracker.begin_epoch(Epoch::new(2));
+        tracker.request(Request::new("glyph", Priority::new(1, 90), 1));
+
+        let report = process_requests_for_test(tracker, |_| 1);
+        assert!(report.evicted().is_empty());
+        assert!(matches!(
+            &report.processed()[0],
+            ProcessedRequest::Admitted {
+                request,
+                displaced: Some(displaced),
+                ..
+            } if request.key() == &"glyph" && displaced.handle() == stale_handle
+        ));
+    }
+
+    #[test]
+    fn process_requests_handles_rejected_work() {
+        let mut tracker = ResidencyTracker::new(Budget::new(1, 1));
+        tracker.begin_epoch(Epoch::new(1));
+        tracker.request(Request::new("too-large", Priority::new(1, 90), 0));
+
+        let report = process_requests_for_test(tracker, |_| 2);
+        assert!(report.evicted().is_empty());
+        assert!(matches!(
+            &report.processed()[0],
+            ProcessedRequest::Rejected {
+                request,
+                cost: 2,
+                displaced: None
+            } if request.key() == &"too-large"
+        ));
+    }
+
+    #[test]
+    fn process_requests_handles_rejected_displacement() {
+        let mut tracker = ResidencyTracker::new(Budget::new(1, 1));
+        tracker.begin_epoch(Epoch::new(1));
+
+        let stale = Request::new("glyph", Priority::new(1, 80), 0);
+        let stale_handle = tracker.admit(&stale, 1).expect("stale resident fits");
+
+        tracker.begin_epoch(Epoch::new(2));
+        tracker.request(Request::new("glyph", Priority::new(1, 90), 1));
+
+        let report = process_requests_for_test(tracker, |_| 2);
+        assert!(report.evicted().is_empty());
+        assert!(matches!(
+            &report.processed()[0],
+            ProcessedRequest::Rejected {
+                request,
+                cost: 2,
+                displaced: Some(displaced)
+            } if request.key() == &"glyph" && displaced.handle() == stale_handle
+        ));
+    }
+
+    #[test]
+    fn process_requests_streams_equivalent_outcomes() {
+        let mut tracker = ResidencyTracker::new(Budget::new(2, 2));
+        tracker.begin_epoch(Epoch::new(1));
+
+        let left = Request::new("left", Priority::new(0, 40), 0);
+        let right = Request::new("right", Priority::new(0, 30), 0);
+        let _left_handle = tracker.admit(&left, 1).expect("left fits");
+        let right_handle = tracker.admit(&right, 1).expect("right fits");
+
+        tracker.begin_epoch(Epoch::new(2));
+        assert!(tracker.mark_used(right_handle));
+        tracker.request(Request::new("new", Priority::new(1, 90), 0));
+
+        let mut batch = RequestProcessingBatch::new(TestSink::new());
+        tracker
+            .process_requests(&mut batch, |_| 1)
+            .expect("batch processing should complete");
+        let sink = batch.into_sink();
+
+        assert_eq!(sink.evicted.len(), 1);
+        assert_eq!(sink.evicted[0].key(), &"right");
+        assert_eq!(sink.processed.len(), 1);
+
+        match &sink.processed[0] {
+            ProcessedRequest::Admitted {
+                request,
+                used_cost_after,
+                crossed_soft_limit,
+                displaced,
+                ..
+            } => {
+                assert_eq!(request.key(), &"new");
+                assert_eq!(*used_cost_after, 2);
+                assert!(!crossed_soft_limit);
+                assert!(displaced.is_none());
+            }
+            other => panic!("expected admission, got {other:?}"),
+        }
     }
 }

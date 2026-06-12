@@ -18,6 +18,7 @@
 //! - the registry keeps its own dense slot model
 //! - `cachet::residency` handles budget, recency, eviction, and request batching
 //! - `cachet::residency::ResidencyBindings` carries the handle-to-slot glue
+//! - `RequestProcessingBatch` lets the demo reuse batch scratch across frames
 //! - no atlas or tile vocabulary leaks into this use case
 
 use cachet::residency;
@@ -32,6 +33,35 @@ struct ResidentImage {
     dense_slot: u32,
 }
 
+struct ImageBatchSink {
+    processed: Vec<residency::ProcessedRequest<ImageHandle>>,
+    evicted: Vec<residency::ResidentEntry<ImageHandle>>,
+}
+
+impl ImageBatchSink {
+    fn new() -> Self {
+        Self {
+            processed: Vec::new(),
+            evicted: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.processed.clear();
+        self.evicted.clear();
+    }
+}
+
+impl residency::RequestProcessingSink<ImageHandle> for ImageBatchSink {
+    fn processed(&mut self, processed: residency::ProcessedRequest<ImageHandle>) {
+        self.processed.push(processed);
+    }
+
+    fn evicted(&mut self, evicted: residency::ResidentEntry<ImageHandle>) {
+        self.evicted.push(evicted);
+    }
+}
+
 fn main() {
     println!("image resource demo");
     println!("===================");
@@ -41,23 +71,25 @@ fn main() {
     let mut bindings = residency::ResidencyBindings::new();
     let mut free_slots = vec![1_u32, 0_u32];
     let mut slots = Vec::<ResidentImage>::new();
+    let mut batch = residency::RequestProcessingBatch::new(ImageBatchSink::new());
 
-    println!("frame 1: queue two images and let the tracker process them");
+    println!("frame 1: queue two images and process them through a reusable batch");
     tracker.begin_epoch(residency::Epoch::new(1));
     let first = residency::Request::new(ImageHandle(10), residency::Priority::new(0, 80), 0);
     let second = residency::Request::new(ImageHandle(11), residency::Priority::new(0, 70), 0);
     tracker.request(first.clone());
     tracker.request(second.clone());
 
-    let report = tracker
-        .process_requests(|_| 1)
+    tracker
+        .process_requests(&mut batch, |_| 1)
         .expect("demo handle space should remain");
-    assign_admitted_slots(&report, &mut bindings, &mut free_slots, &mut slots);
+    assign_admitted_slots(batch.sink(), &mut bindings, &mut free_slots, &mut slots);
     print_slots("after frame 1 admission", &slots);
 
     println!();
     println!("frame 2: touch one image, queue another, and let the tracker evict for us");
     tracker.begin_epoch(residency::Epoch::new(2));
+    batch.sink_mut().clear();
     let first_handle = tracker
         .resident_handle_for_key(&ImageHandle(10))
         .expect("image 10 should still be resident");
@@ -66,10 +98,10 @@ fn main() {
 
     let third = residency::Request::new(ImageHandle(12), residency::Priority::new(0, 90), 0);
     tracker.request(third);
-    let report = tracker
-        .process_requests(|_| 1)
+    tracker
+        .process_requests(&mut batch, |_| 1)
         .expect("demo handle space should remain");
-    for evicted in report.evicted() {
+    for evicted in &batch.sink().evicted {
         let freed_slot = bindings
             .unbind(evicted.handle())
             .expect("evicted residents should have a bound slot");
@@ -82,7 +114,7 @@ fn main() {
         free_slots.push(freed_slot);
         slots.retain(|slot| slot.resident != evicted.handle());
     }
-    assign_admitted_slots(&report, &mut bindings, &mut free_slots, &mut slots);
+    assign_admitted_slots(batch.sink(), &mut bindings, &mut free_slots, &mut slots);
 
     let summary = tracker.end_epoch();
     println!();
@@ -111,12 +143,12 @@ fn print_slots(label: &str, slots: &[ResidentImage]) {
 }
 
 fn assign_admitted_slots(
-    report: &residency::RequestProcessingReport<ImageHandle>,
+    sink: &ImageBatchSink,
     bindings: &mut residency::ResidencyBindings<u32>,
     free_slots: &mut Vec<u32>,
     slots: &mut Vec<ResidentImage>,
 ) {
-    for processed in report.processed() {
+    for processed in &sink.processed {
         if let residency::ProcessedRequest::Admitted {
             request, handle, ..
         } = processed

@@ -61,10 +61,12 @@
 //!     .queue(request.clone())
 //!     .expect("atlas keys should use stable metadata");
 //!
-//! let report = cache
-//!     .process_queued(|_| 1)
+//! let mut batch = atlas::AtlasProcessingBatch::new(atlas::AtlasProcessingOutput::new());
+//! cache
+//!     .process_queued(&mut batch, |_| 1)
 //!     .expect("room for one glyph");
-//! let resolved = report
+//! let resolved = batch
+//!     .sink()
 //!     .processed()
 //!     .iter()
 //!     .find_map(|processed| match processed {
@@ -149,6 +151,16 @@
 //! page-pressure diagnostics. One atlas key is also expected to carry stable
 //! atlas metadata, so [`atlas::AtlasCache::queue`] rejects contradictory class
 //! or size information for the same key.
+//!
+//! Batch-processing shapes:
+//!
+//! - [`residency::RequestProcessingBatch`] and
+//!   [`atlas::AtlasProcessingBatch`] carry the reusable batch contexts for
+//!   `process_requests()` and `process_queued()`
+//! - [`residency::RequestProcessingOutput`] and
+//!   [`atlas::AtlasProcessingOutput`] are reusable Vec-backed output sinks
+//! - callers should keep batch/output storage around and reuse it across
+//!   steady-state epochs
 //!
 //! This keeps one use case's nouns from taking over the others:
 //!

@@ -5,8 +5,8 @@ use alloc::vec::Vec;
 use core::{cmp::Reverse, fmt, hash::Hash};
 
 use cachet_residency::{
-    AdmissionError, Budget, Epoch, ProcessedRequest, ResidencyBindings, ResidencyHandle,
-    ResidencyTracker, ResidentEntry,
+    AdmissionError, Budget, Epoch, ProcessedRequest, RequestProcessingBatch, RequestProcessingSink,
+    ResidencyBindings, ResidencyHandle, ResidencyTracker, ResidentEntry,
 };
 use cachet_storage::{
     AllocationError, AtlasPageId, PagedAtlasSlot, RectAtlasSet, RectAtlasSetStats, RectAtlasStats,
@@ -66,6 +66,15 @@ impl fmt::Display for AtlasQueueError {
 }
 
 impl core::error::Error for AtlasQueueError {}
+
+/// Caller-owned sink for streamed atlas batch outcomes.
+pub trait AtlasProcessingSink<K> {
+    /// Receives one atlas-facing outcome for a queued request.
+    fn processed(&mut self, processed: AtlasProcessedRequest<K>);
+
+    /// Receives one resolved artifact evicted to make room during processing.
+    fn evicted(&mut self, evicted: ResolvedArtifact<K>);
+}
 
 /// One atlas-facing outcome reported by [`AtlasCache::process_queued`].
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,21 +152,116 @@ impl<K> AtlasProcessedRequest<K> {
     }
 }
 
-/// Atlas-facing report returned by [`AtlasCache::process_queued`].
+/// Caller-owned batch context passed to [`AtlasCache::process_queued`].
+///
+/// The batch owns reusable scratch for pending atlas requests, reusable
+/// residency-side batch state, reusable page-candidate scratch, and a
+/// caller-owned sink for atlas-facing outcomes.
+#[derive(Clone, Debug)]
+pub struct AtlasProcessingBatch<K, S> {
+    pending: Vec<ArtifactRequest<K>>,
+    residency: RequestProcessingBatch<K, CollectingResidencySink<K>>,
+    page_candidates: Vec<AtlasPageId>,
+    sink: S,
+}
+
+impl<K, S> AtlasProcessingBatch<K, S> {
+    /// Creates an atlas processing batch from a caller-owned sink.
+    #[must_use]
+    pub fn new(sink: S) -> Self {
+        Self {
+            pending: Vec::new(),
+            residency: RequestProcessingBatch::new(CollectingResidencySink::new()),
+            page_candidates: Vec::new(),
+            sink,
+        }
+    }
+
+    /// Creates a batch with preallocated request scratch capacity.
+    #[must_use]
+    pub fn with_capacity(request_capacity: usize, sink: S) -> Self {
+        Self {
+            pending: Vec::with_capacity(request_capacity),
+            residency: RequestProcessingBatch::with_capacity(
+                request_capacity,
+                CollectingResidencySink::with_capacity(request_capacity),
+            ),
+            page_candidates: Vec::new(),
+            sink,
+        }
+    }
+
+    /// Returns the sink carried by this batch.
+    #[must_use]
+    pub const fn sink(&self) -> &S {
+        &self.sink
+    }
+
+    /// Returns the sink carried by this batch mutably.
+    #[must_use]
+    pub fn sink_mut(&mut self) -> &mut S {
+        &mut self.sink
+    }
+
+    /// Returns the sink, consuming the batch.
+    #[must_use]
+    pub fn into_sink(self) -> S {
+        self.sink
+    }
+
+    fn capture_pending(&mut self, pending: &mut Vec<ArtifactRequest<K>>) {
+        // Swap the controller's current pending buffer into the batch so the
+        // batch can sort and drain it in place. The controller receives the
+        // batch's previous scratch buffer back, preserving queue capacity for
+        // the next round of `queue()` calls instead of dropping it.
+        self.pending.clear();
+        core::mem::swap(&mut self.pending, pending);
+    }
+}
+
+/// Reusable output sink for atlas batch processing.
+///
+/// This type owns `Vec` storage, but it is meant to be kept inside an
+/// [`AtlasProcessingBatch`] and reused across batches. Call [`Self::clear`]
+/// before processing if the previous results are no longer needed.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct AtlasProcessingReport<K> {
+pub struct AtlasProcessingOutput<K> {
     processed: Vec<AtlasProcessedRequest<K>>,
     evicted: Vec<ResolvedArtifact<K>>,
 }
 
-impl<K> AtlasProcessingReport<K> {
-    /// Creates an atlas processing report.
+impl<K> AtlasProcessingOutput<K> {
+    /// Creates empty atlas-processing output.
     #[must_use]
-    pub const fn new(
+    pub const fn new() -> Self {
+        Self {
+            processed: Vec::new(),
+            evicted: Vec::new(),
+        }
+    }
+
+    /// Creates output with preallocated processed-result capacity.
+    #[must_use]
+    pub fn with_capacity(processed_capacity: usize) -> Self {
+        Self {
+            processed: Vec::with_capacity(processed_capacity),
+            evicted: Vec::new(),
+        }
+    }
+
+    /// Creates output from existing vectors.
+    #[must_use]
+    pub const fn from_parts(
         processed: Vec<AtlasProcessedRequest<K>>,
         evicted: Vec<ResolvedArtifact<K>>,
     ) -> Self {
         Self { processed, evicted }
+    }
+
+    /// Clears previous results while preserving allocated capacity.
+    pub fn clear(&mut self) {
+        self.processed.clear();
+        self.evicted.clear();
     }
 
     /// Returns one outcome per processed queued atlas request.
@@ -174,6 +278,65 @@ impl<K> AtlasProcessingReport<K> {
     #[must_use]
     pub fn evicted(&self) -> &[ResolvedArtifact<K>] {
         &self.evicted
+    }
+
+    /// Returns the owned result vectors.
+    #[must_use]
+    pub fn into_parts(self) -> (Vec<AtlasProcessedRequest<K>>, Vec<ResolvedArtifact<K>>) {
+        (self.processed, self.evicted)
+    }
+}
+
+impl<K> Default for AtlasProcessingOutput<K> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K> AtlasProcessingSink<K> for AtlasProcessingOutput<K> {
+    fn processed(&mut self, processed: AtlasProcessedRequest<K>) {
+        self.processed.push(processed);
+    }
+
+    fn evicted(&mut self, evicted: ResolvedArtifact<K>) {
+        self.evicted.push(evicted);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CollectingResidencySink<K> {
+    processed: Vec<ProcessedRequest<K>>,
+    evicted: Vec<ResidentEntry<K>>,
+}
+
+impl<K> CollectingResidencySink<K> {
+    fn new() -> Self {
+        Self {
+            processed: Vec::new(),
+            evicted: Vec::new(),
+        }
+    }
+
+    fn with_capacity(processed_capacity: usize) -> Self {
+        Self {
+            processed: Vec::with_capacity(processed_capacity),
+            evicted: Vec::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.processed.clear();
+        self.evicted.clear();
+    }
+}
+
+impl<K> RequestProcessingSink<K> for CollectingResidencySink<K> {
+    fn processed(&mut self, processed: ProcessedRequest<K>) {
+        self.processed.push(processed);
+    }
+
+    fn evicted(&mut self, evicted: ResidentEntry<K>) {
+        self.evicted.push(evicted);
     }
 }
 
@@ -370,58 +533,60 @@ where
         self.mark_used_handle(handle)
     }
 
-    /// Processes all queued atlas requests through residency and storage.
+    /// Processes queued atlas requests using a caller-owned batch context.
     ///
     /// The caller provides a cost model in the same spirit as
     /// [`ResidencyTracker::process_requests`](cachet_residency::ResidencyTracker::process_requests),
-    /// but receives atlas-facing outcomes and resolved artifacts back.
-    pub fn process_queued<F>(
+    /// but receives atlas-facing outcomes through the batch's sink.
+    ///
+    /// The controller reorders pending requests by priority, but it reuses the
+    /// batch's pending-request scratch, residency-side batch state,
+    /// page-candidate scratch, and atlas sink storage instead of allocating
+    /// fresh temporary vectors on every call.
+    pub fn process_queued<F, S>(
         &mut self,
+        batch: &mut AtlasProcessingBatch<K, S>,
         mut cost_for: F,
-    ) -> Result<AtlasProcessingReport<K>, AdmissionError>
+    ) -> Result<(), AdmissionError>
     where
         F: FnMut(&ArtifactRequest<K>) -> u32,
+        S: AtlasProcessingSink<K>,
     {
-        let mut pending = core::mem::take(&mut self.pending);
-        pending.sort_by_key(|request| Reverse(request.request().priority()));
-        for request in &pending {
+        batch.capture_pending(&mut self.pending);
+        batch.residency.sink_mut().clear();
+
+        batch
+            .pending
+            .sort_unstable_by_key(|request| Reverse(request.request().priority()));
+        for request in batch.pending.iter() {
             self.tracker.request(request.request().clone());
         }
 
-        let mut pending_for_cost = pending.iter();
-        let report = self.tracker.process_requests(|request| {
-            let pending_request = pending_for_cost
-                .next()
-                .expect("queued atlas requests must round-trip through residency");
-            debug_assert!(
-                pending_request.request().key() == request.key()
-                    && pending_request.request().priority() == request.priority()
-                    && pending_request.request().generation() == request.generation()
-            );
-            cost_for(pending_request)
-        })?;
+        let mut pending_for_cost = batch.pending.iter();
+        self.tracker
+            .process_requests(&mut batch.residency, |request| {
+                let pending_request = pending_for_cost
+                    .next()
+                    .expect("queued atlas requests must round-trip through residency");
+                debug_assert!(
+                    pending_request.request().key() == request.key()
+                        && pending_request.request().priority() == request.priority()
+                        && pending_request.request().generation() == request.generation()
+                );
+                cost_for(pending_request)
+            })?;
 
-        let displaced: Vec<_> = report
-            .processed()
-            .iter()
-            .map(|processed| {
-                processed
-                    .displaced()
-                    .map(|resident| self.take_resolved(resident))
-            })
-            .collect();
-        let evicted: Vec<_> = report
-            .evicted()
-            .iter()
-            .map(|resident| self.take_resolved(resident))
-            .collect();
+        for resident in batch.residency.sink_mut().evicted.drain(..) {
+            let artifact = self.take_resolved(&resident);
+            batch.sink.evicted(artifact);
+        }
 
-        let mut processed_out = Vec::with_capacity(report.processed().len());
-        for ((processed, displaced), atlas_request) in report
-            .processed()
-            .iter()
-            .zip(displaced.into_iter())
-            .zip(pending.into_iter())
+        for (processed, atlas_request) in batch
+            .residency
+            .sink_mut()
+            .processed
+            .drain(..)
+            .zip(batch.pending.drain(..))
         {
             debug_assert!(
                 atlas_request.request().key() == processed.request().key()
@@ -429,21 +594,27 @@ where
                     && atlas_request.request().generation() == processed.request().generation()
             );
 
+            let displaced = processed
+                .displaced()
+                .map(|resident| self.take_resolved(resident));
+
             match processed {
                 ProcessedRequest::AlreadyResident { handle, .. } => {
                     let artifact = self
-                        .resolved_from_binding(atlas_request.request().key().clone(), *handle)
+                        .resolved_from_binding(atlas_request.request().key().clone(), handle)
                         .expect("already-resident atlas request must have a bound slot");
-                    processed_out.push(AtlasProcessedRequest::AlreadyResident {
-                        request: atlas_request,
-                        handle: *handle,
-                        artifact,
-                    });
+                    batch
+                        .sink
+                        .processed(AtlasProcessedRequest::AlreadyResident {
+                            request: atlas_request,
+                            handle,
+                            artifact,
+                        });
                 }
                 ProcessedRequest::Rejected { cost, .. } => {
-                    processed_out.push(AtlasProcessedRequest::Rejected {
+                    batch.sink.processed(AtlasProcessedRequest::Rejected {
                         request: atlas_request,
-                        cost: *cost,
+                        cost,
                         displaced,
                     });
                 }
@@ -452,10 +623,10 @@ where
                     used_cost_after,
                     crossed_soft_limit,
                     ..
-                } => match self.allocate_for_request(&atlas_request) {
+                } => match self.allocate_for_request(&atlas_request, &mut batch.page_candidates) {
                     Ok(slot) => {
                         let _ = self.bindings.bind(
-                            *handle,
+                            handle,
                             AtlasBinding {
                                 class: atlas_request.class(),
                                 slot,
@@ -466,40 +637,45 @@ where
                             atlas_request.class(),
                             slot,
                         );
-                        processed_out.push(AtlasProcessedRequest::Resolved {
+                        batch.sink.processed(AtlasProcessedRequest::Resolved {
                             request: atlas_request,
-                            handle: *handle,
+                            handle,
                             artifact,
-                            used_cost_after: *used_cost_after,
-                            crossed_soft_limit: *crossed_soft_limit,
+                            used_cost_after,
+                            crossed_soft_limit,
                             displaced,
                         });
                     }
                     Err(error) => {
                         let removed = self
                             .tracker
-                            .remove(*handle)
+                            .remove(handle)
                             .expect("newly admitted resident must be removable on rollback");
-                        processed_out.push(AtlasProcessedRequest::AllocationRejected {
-                            request: atlas_request,
-                            cost: removed.cost(),
-                            error,
-                            displaced,
-                        });
+                        batch
+                            .sink
+                            .processed(AtlasProcessedRequest::AllocationRejected {
+                                request: atlas_request,
+                                cost: removed.cost(),
+                                error,
+                                displaced,
+                            });
                     }
                 },
             }
         }
 
-        Ok(AtlasProcessingReport::new(processed_out, evicted))
+        Ok(())
     }
 
     fn allocate_for_request(
         &mut self,
         request: &ArtifactRequest<K>,
+        page_candidates: &mut Vec<AtlasPageId>,
     ) -> Result<PagedAtlasSlot, AtlasAllocationError> {
         let mut last_error = None;
-        for page in self.router.candidate_pages_for(request, &self.pages) {
+        self.router
+            .candidate_pages(request, &self.pages, page_candidates);
+        for page in page_candidates.iter().copied() {
             match self
                 .pages
                 .allocate_in(page, request.size().width(), request.size().height())
@@ -545,6 +721,54 @@ mod tests {
     #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
     struct GlyphKey(&'static str);
 
+    struct TestAtlasSink<K> {
+        processed: Vec<AtlasProcessedRequest<K>>,
+        evicted: Vec<ResolvedArtifact<K>>,
+    }
+
+    impl<K> TestAtlasSink<K> {
+        fn new() -> Self {
+            Self {
+                processed: Vec::new(),
+                evicted: Vec::new(),
+            }
+        }
+    }
+
+    impl<K> AtlasProcessingSink<K> for TestAtlasSink<K> {
+        fn processed(&mut self, processed: AtlasProcessedRequest<K>) {
+            self.processed.push(processed);
+        }
+
+        fn evicted(&mut self, evicted: ResolvedArtifact<K>) {
+            self.evicted.push(evicted);
+        }
+    }
+
+    fn process_queued_output(
+        cache: &mut AtlasCache<GlyphKey>,
+    ) -> Result<AtlasProcessingOutput<GlyphKey>, AdmissionError> {
+        let mut batch = AtlasProcessingBatch::new(AtlasProcessingOutput::new());
+        cache.process_queued(&mut batch, |_| 1)?;
+        Ok(batch.into_sink())
+    }
+
+    fn process_queued_for_test(mut cache: AtlasCache<GlyphKey>) -> AtlasProcessingOutput<GlyphKey> {
+        process_queued_output(&mut cache).expect("batch processing should complete")
+    }
+
+    fn two_page_cache(budget: Budget) -> AtlasCache<GlyphKey> {
+        let mut pages = RectAtlasSet::new();
+        let page0 = pages.add_page(6, 4).expect("page id fits");
+        let page1 = pages.add_page(6, 4).expect("page id fits");
+
+        let mut router = AtlasPageRouter::new();
+        assert!(router.register_page(AtlasClass::new(1), page0));
+        assert!(router.register_page(AtlasClass::new(1), page1));
+
+        AtlasCache::new(budget, pages, router)
+    }
+
     #[test]
     fn atlas_cache_routes_across_pages_and_reuses_evicted_space() {
         let mut pages = RectAtlasSet::new();
@@ -564,9 +788,7 @@ mod tests {
             .queue(glyph_request("B", 70))
             .expect("metadata should be consistent");
 
-        let first = cache
-            .process_queued(|_| 1)
-            .expect("initial requests should process");
+        let first = process_queued_output(&mut cache).expect("initial requests should process");
 
         assert_eq!(first.evicted().len(), 0);
         assert_eq!(cache.stats().pending(), 0);
@@ -586,9 +808,7 @@ mod tests {
         cache
             .queue(glyph_request("C", 90))
             .expect("metadata should be consistent");
-        let second = cache
-            .process_queued(|_| 1)
-            .expect("follow-up requests should process");
+        let second = process_queued_output(&mut cache).expect("follow-up requests should process");
 
         assert_eq!(second.evicted().len(), 1);
         assert_eq!(second.evicted()[0].key(), &GlyphKey("B"));
@@ -631,7 +851,7 @@ mod tests {
         cache
             .queue(glyph_request("A", 80))
             .expect("metadata should be consistent");
-        let report = cache.process_queued(|_| 1).expect("request should resolve");
+        let report = process_queued_output(&mut cache).expect("request should resolve");
 
         let handle = report
             .processed()
@@ -654,6 +874,202 @@ mod tests {
                 .get(),
             2
         );
+    }
+
+    #[test]
+    fn atlas_cache_process_queued_streams_equivalent_outcomes() {
+        let mut pages = RectAtlasSet::new();
+        let page0 = pages.add_page(6, 4).expect("page id fits");
+        let page1 = pages.add_page(6, 4).expect("page id fits");
+
+        let mut router = AtlasPageRouter::new();
+        assert!(router.register_page(AtlasClass::new(1), page0));
+        assert!(router.register_page(AtlasClass::new(1), page1));
+
+        let mut cache = AtlasCache::new(Budget::new(2, 2), pages, router);
+        cache.begin_epoch(Epoch::new(1));
+        cache
+            .queue(glyph_request("A", 80))
+            .expect("metadata should be consistent");
+        cache
+            .queue(glyph_request("B", 70))
+            .expect("metadata should be consistent");
+
+        let mut batch = AtlasProcessingBatch::new(TestAtlasSink::new());
+        cache
+            .process_queued(&mut batch, |_| 1)
+            .expect("initial requests should process");
+
+        assert_eq!(batch.sink().processed.len(), 2);
+        assert!(batch.sink().evicted.is_empty());
+        assert_eq!(cache.stats().pending(), 0);
+        assert_eq!(cache.stats().residents(), 2);
+
+        cache.begin_epoch(Epoch::new(2));
+        cache
+            .queue(glyph_request("C", 90))
+            .expect("metadata should be consistent");
+        cache
+            .process_queued(&mut batch, |_| 1)
+            .expect("follow-up requests should process");
+
+        assert_eq!(batch.sink().evicted.len(), 1);
+        assert_eq!(batch.sink().evicted[0].key(), &GlyphKey("B"));
+        assert!(cache.resolved_by_key(&GlyphKey("C")).is_some());
+    }
+
+    #[test]
+    fn atlas_cache_process_queued_handles_already_resident_work() {
+        let mut cache = two_page_cache(Budget::new(2, 2));
+        cache.begin_epoch(Epoch::new(1));
+        cache
+            .queue(glyph_request("A", 80))
+            .expect("metadata should be consistent");
+        let first = process_queued_output(&mut cache).expect("request should resolve");
+        let handle = first
+            .processed()
+            .iter()
+            .find_map(|processed| match processed {
+                AtlasProcessedRequest::Resolved { handle, .. } => Some(*handle),
+                _ => None,
+            })
+            .expect("glyph A should resolve");
+
+        cache.begin_epoch(Epoch::new(2));
+        cache
+            .queue(glyph_request("A", 80))
+            .expect("metadata should be consistent");
+
+        let report = process_queued_for_test(cache);
+        assert!(report.evicted().is_empty());
+        assert!(matches!(
+            &report.processed()[0],
+            AtlasProcessedRequest::AlreadyResident {
+                request,
+                handle: reused,
+                ..
+            } if request.request().key() == &GlyphKey("A") && *reused == handle
+        ));
+    }
+
+    #[test]
+    fn atlas_cache_process_queued_handles_displaced_work() {
+        let mut cache = two_page_cache(Budget::new(2, 2));
+        cache.begin_epoch(Epoch::new(1));
+        cache
+            .queue(glyph_request("A", 80))
+            .expect("metadata should be consistent");
+        let first = process_queued_output(&mut cache).expect("request should resolve");
+        let displaced = first
+            .processed()
+            .iter()
+            .find_map(|processed| match processed {
+                AtlasProcessedRequest::Resolved { artifact, .. } => Some(*artifact),
+                _ => None,
+            })
+            .expect("glyph A should resolve");
+
+        cache.begin_epoch(Epoch::new(2));
+        cache
+            .queue(ArtifactRequest::new(
+                GlyphKey("A"),
+                AtlasClass::new(1),
+                crate::ArtifactSize::new(6, 4),
+                Priority::new(1, 90),
+                1,
+            ))
+            .expect("metadata should be consistent");
+
+        let report = process_queued_for_test(cache);
+        assert!(report.evicted().is_empty());
+        assert!(matches!(
+            &report.processed()[0],
+            AtlasProcessedRequest::Resolved {
+                request,
+                displaced: Some(actual),
+                ..
+            } if request.request().key() == &GlyphKey("A") && *actual == displaced
+        ));
+    }
+
+    #[test]
+    fn atlas_cache_process_queued_handles_residency_rejection() {
+        let mut cache = two_page_cache(Budget::new(1, 1));
+        cache.begin_epoch(Epoch::new(1));
+        cache
+            .queue(glyph_request("A", 90))
+            .expect("metadata should be consistent");
+        process_queued_output(&mut cache).expect("request should resolve");
+
+        cache.begin_epoch(Epoch::new(2));
+        cache
+            .queue(glyph_request("B", 10))
+            .expect("metadata should be consistent");
+
+        let report = process_queued_for_test(cache);
+        assert!(report.evicted().is_empty());
+        assert!(matches!(
+            &report.processed()[0],
+            AtlasProcessedRequest::Rejected {
+                request,
+                cost: 1,
+                displaced: None
+            } if request.request().key() == &GlyphKey("B")
+        ));
+    }
+
+    #[test]
+    fn atlas_cache_process_queued_handles_eviction() {
+        let mut cache = two_page_cache(Budget::new(2, 2));
+        cache.begin_epoch(Epoch::new(1));
+        cache
+            .queue(glyph_request("A", 80))
+            .expect("metadata should be consistent");
+        cache
+            .queue(glyph_request("B", 70))
+            .expect("metadata should be consistent");
+        process_queued_output(&mut cache).expect("requests should resolve");
+
+        cache.begin_epoch(Epoch::new(2));
+        cache
+            .queue(glyph_request("C", 90))
+            .expect("metadata should be consistent");
+
+        let report = process_queued_for_test(cache);
+        assert_eq!(report.evicted().len(), 1);
+        assert_eq!(report.evicted()[0].key(), &GlyphKey("B"));
+        assert!(matches!(
+            &report.processed()[0],
+            AtlasProcessedRequest::Resolved {
+                request,
+                displaced: None,
+                ..
+            } if request.request().key() == &GlyphKey("C")
+        ));
+    }
+
+    #[test]
+    fn atlas_cache_process_queued_handles_allocation_rejection() {
+        let pages = RectAtlasSet::new();
+        let router = AtlasPageRouter::new();
+        let mut cache = AtlasCache::new(Budget::new(1, 1), pages, router);
+
+        cache.begin_epoch(Epoch::new(1));
+        cache
+            .queue(glyph_request("A", 80))
+            .expect("metadata should be consistent");
+
+        let report = process_queued_for_test(cache);
+        assert!(report.evicted().is_empty());
+        assert!(matches!(
+            &report.processed()[0],
+            AtlasProcessedRequest::AllocationRejected {
+                request,
+                cost: 1,
+                error: AtlasAllocationError::NoCompatiblePage,
+                displaced: None
+            } if request.request().key() == &GlyphKey("A")
+        ));
     }
 
     #[test]
@@ -697,7 +1113,7 @@ mod tests {
         cache
             .queue(glyph_request("A", 80))
             .expect("first request should queue");
-        let _ = cache.process_queued(|_| 1).expect("request should resolve");
+        let _ = process_queued_output(&mut cache).expect("request should resolve");
 
         let error = cache
             .queue(ArtifactRequest::new(

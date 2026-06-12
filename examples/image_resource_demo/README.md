@@ -9,9 +9,11 @@ eviction policy.
 What it demonstrates:
 
 - a registry-style consumer built directly on `cachet::residency`
-- `ResidencyTracker::process_requests` as the calmer batch admission path
+- `ResidencyTracker::process_requests` as the reusable lower-allocation
+  batch path
 - `ResidencyBindings` as the handle-to-slot glue
 - a caller-owned dense resident-slot table
+- a caller-owned `RequestProcessingBatch` reused across frame-like phases
 - reuse of dense slots after eviction
 - no dependency on `cachet::storage`
 
@@ -22,4 +24,5 @@ cargo run -p image_resource_demo
 ```
 
 The output is structured as two frame-like phases so you can see how explicit
-usage tracking changes which resident gets evicted.
+usage tracking changes which resident gets evicted, while the same batch
+context is reused across both phases.

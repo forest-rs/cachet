@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "benchmarks/cachet_wind_tunnel",
     "crates/cachet",
     "crates/cachet_atlas",
     "crates/cachet_residency",
