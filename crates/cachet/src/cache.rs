@@ -96,6 +96,14 @@ where
             .is_some_and(|entry| entry.phase == EntryPhase::Ready)
     }
 
+    pub(crate) fn reserved_placement(&self, id: EntryId) -> Result<Placement, PublishError> {
+        let entry = self.entry(id).ok_or(PublishError::InvalidEntry(id))?;
+        if entry.phase != EntryPhase::Reserved {
+            return Err(PublishError::NotReserved(id));
+        }
+        Ok(entry.placement)
+    }
+
     /// Looks up and touches a published artifact.
     ///
     /// The returned borrow does not prevent later physical reuse. Copy its

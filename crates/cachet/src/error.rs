@@ -3,7 +3,7 @@
 
 use core::fmt;
 
-use crate::{EntryId, Extent};
+use crate::{ConfigError, EntryId, Extent};
 
 /// Failure to reserve physical atlas placement.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,3 +112,85 @@ impl fmt::Display for LeaseError {
 }
 
 impl core::error::Error for LeaseError {}
+
+/// Invalid configuration for a CPU-backed atlas.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CpuConfigError {
+    /// The underlying placement configuration is invalid.
+    Atlas(ConfigError),
+    /// A CPU texel contains zero bytes.
+    ZeroTexelBytes,
+    /// The byte length of one CPU page does not fit in `usize`.
+    PageBytesOverflow,
+}
+
+impl fmt::Display for CpuConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Atlas(error) => error.fmt(formatter),
+            Self::ZeroTexelBytes => formatter.write_str("CPU atlas texels must contain bytes"),
+            Self::PageBytesOverflow => {
+                formatter.write_str("CPU atlas page byte length overflows usize")
+            }
+        }
+    }
+}
+
+impl core::error::Error for CpuConfigError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        match self {
+            Self::Atlas(error) => Some(error),
+            Self::ZeroTexelBytes | Self::PageBytesOverflow => None,
+        }
+    }
+}
+
+impl From<ConfigError> for CpuConfigError {
+    fn from(error: ConfigError) -> Self {
+        Self::Atlas(error)
+    }
+}
+
+/// Failure to populate a vacant CPU-backed reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PopulateError {
+    /// The entry identifier is stale or unknown.
+    InvalidEntry(EntryId),
+    /// The entry is not a vacant reservation.
+    NotReserved(EntryId),
+    /// The raster extent differs from the reserved content extent.
+    ExtentMismatch {
+        /// Extent reserved in the atlas.
+        reserved: Extent,
+        /// Extent supplied by the raster.
+        raster: Extent,
+    },
+    /// The source row stride is shorter than one content row.
+    StrideTooSmall,
+    /// The byte slice does not contain every described source row.
+    DataTooShort,
+    /// Source raster layout arithmetic does not fit in `usize`.
+    RasterLayoutOverflow,
+    /// The monotonic dirty-upload sequence is exhausted.
+    UploadSequenceExhausted,
+}
+
+impl fmt::Display for PopulateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidEntry(_) => formatter.write_str("the atlas entry is stale or unknown"),
+            Self::NotReserved(_) => formatter.write_str("the atlas entry is not vacant"),
+            Self::ExtentMismatch { .. } => {
+                formatter.write_str("raster extent does not match the reservation")
+            }
+            Self::StrideTooSmall => formatter.write_str("raster row stride is too small"),
+            Self::DataTooShort => formatter.write_str("raster bytes do not contain every row"),
+            Self::RasterLayoutOverflow => formatter.write_str("raster layout overflows usize"),
+            Self::UploadSequenceExhausted => {
+                formatter.write_str("the dirty-upload sequence is exhausted")
+            }
+        }
+    }
+}
+
+impl core::error::Error for PopulateError {}

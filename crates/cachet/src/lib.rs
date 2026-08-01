@@ -13,17 +13,23 @@ extern crate alloc;
 mod allocator;
 mod cache;
 mod config;
+mod cpu;
 mod error;
 mod geometry;
 mod model;
 mod stats;
+mod upload;
 
 pub use cache::AtlasCache;
 pub use config::{AtlasConfig, ConfigError};
-pub use error::{AbortError, LeaseError, PublishError, ReserveError};
+pub use cpu::{CpuAtlasCache, CpuAtlasConfig, CpuMetrics, CpuPageStats, CpuStats, Raster};
+pub use error::{
+    AbortError, CpuConfigError, LeaseError, PopulateError, PublishError, ReserveError,
+};
 pub use geometry::{Extent, Rect};
 pub use model::{
     ArtifactRef, EntryId, Evicted, Invalidated, Lease, PageId, Placement, Publication, Reservation,
     ReservationStatus,
 };
 pub use stats::{CacheMetrics, CacheStats, PageStats};
+pub use upload::{PageData, PageUpload, UploadAcknowledgement, UploadCheckpoint, UploadRegion};
