@@ -10,3 +10,6 @@ production, pixel semantics, GPU resources, uploads, and synchronization.
 Use a separate cache for each complete page-compatibility domain. See
 [`docs/adr-0001-raster-artifact-atlas.md`](docs/adr-0001-raster-artifact-atlas.md)
 for the boundary and first-slice invariants.
+
+Runnable workspace examples cover mixed coverage/color glyphs, direct GPU
+population ownership, and a sprite-shaped consumer.

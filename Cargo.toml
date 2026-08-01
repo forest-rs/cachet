@@ -2,6 +2,9 @@
 resolver = "2"
 members = [
   "crates/cachet",
+  "examples/glyph-atlas-demo",
+  "examples/gpu-atlas-demo",
+  "examples/sprite-atlas-demo",
 ]
 
 [workspace.package]

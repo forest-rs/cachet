@@ -7,9 +7,10 @@ use crate::Extent;
 
 /// Homogeneous physical configuration for an [`AtlasCache`](crate::AtlasCache).
 ///
-/// Pixel meaning is deliberately caller-owned. Two caches may both use four
-/// bytes per texel while remaining incompatible because their color space,
-/// alpha convention, sampling, padding, or retention behavior differs.
+/// Pixel meaning and backing are deliberately caller-owned. Two caches may use
+/// identical geometry while remaining incompatible because their storage,
+/// color space, alpha convention, sampling, padding, or retention behavior
+/// differs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AtlasConfig {
     page_extent: Extent,

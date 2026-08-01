@@ -252,6 +252,7 @@ where
         let removed = self.index.remove(&key);
         debug_assert_eq!(removed, Some(id));
         self.free_placement(entry.placement);
+        self.metrics.aborts = self.metrics.aborts.saturating_add(1);
         Ok(key)
     }
 
@@ -309,6 +310,11 @@ where
             entry.last_used = last_used;
             pins.push(Arc::clone(&entry.pin));
         }
+        self.metrics.lease_batches = self.metrics.lease_batches.saturating_add(1);
+        self.metrics.leased_entries = self
+            .metrics
+            .leased_entries
+            .saturating_add(pins.len() as u64);
         Ok(Lease::new(pins))
     }
 
@@ -685,6 +691,7 @@ mod tests {
         let mut cache = cache(Extent::new(2, 2), 1);
         let old = reserve_vacant(&mut cache, "old", Extent::new(2, 2));
         assert_eq!(cache.abort(old.entry()), Ok("old"));
+        assert_eq!(cache.metrics().aborts(), 1);
         let new = reserve_vacant(&mut cache, "new", Extent::new(2, 2));
         assert_eq!(old.entry().index(), new.entry().index());
         assert_ne!(old.entry().generation(), new.entry().generation());
@@ -712,6 +719,8 @@ mod tests {
             .expect("ready entry leases");
         assert_eq!(lease.entries(), 1);
         assert_eq!(cache.stats().leased_entries(), 1);
+        assert_eq!(cache.metrics().lease_batches(), 1);
+        assert_eq!(cache.metrics().leased_entries(), 1);
     }
 
     #[test]

@@ -11,6 +11,9 @@ pub struct CacheMetrics {
     pub(crate) misses: u64,
     pub(crate) reservations: u64,
     pub(crate) publications: u64,
+    pub(crate) aborts: u64,
+    pub(crate) lease_batches: u64,
+    pub(crate) leased_entries: u64,
     pub(crate) evictions: u64,
     pub(crate) invalidations: u64,
     pub(crate) deferred_reuses: u64,
@@ -48,6 +51,24 @@ impl CacheMetrics {
     #[must_use]
     pub const fn publications(self) -> u64 {
         self.publications
+    }
+
+    /// Returns vacant reservations explicitly aborted.
+    #[must_use]
+    pub const fn aborts(self) -> u64 {
+        self.aborts
+    }
+
+    /// Returns successful explicit batch-lease operations.
+    #[must_use]
+    pub const fn lease_batches(self) -> u64 {
+        self.lease_batches
+    }
+
+    /// Returns distinct entries pinned by explicit batch leases.
+    #[must_use]
+    pub const fn leased_entries(self) -> u64 {
+        self.leased_entries
     }
 
     /// Returns ready artifacts evicted under capacity pressure.

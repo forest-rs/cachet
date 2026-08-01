@@ -91,6 +91,7 @@ impl<'a> Raster<'a> {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CpuMetrics {
     populations: u64,
+    population_failures: u64,
     raster_bytes: u64,
     upload_regions_acknowledged: u64,
     upload_texels_acknowledged: u64,
@@ -101,6 +102,12 @@ impl CpuMetrics {
     #[must_use]
     pub const fn populations(self) -> u64 {
         self.populations
+    }
+
+    /// Returns rejected CPU population attempts.
+    #[must_use]
+    pub const fn population_failures(self) -> u64 {
+        self.population_failures
     }
 
     /// Returns source raster bytes copied, excluding generated padding.
@@ -291,42 +298,44 @@ where
         raster: Raster<'_>,
         metadata: M,
     ) -> Result<Publication, PopulateError> {
-        let placement = self
-            .atlas
-            .reserved_placement(id)
-            .map_err(map_publish_error)?;
+        let placement = match self.atlas.reserved_placement(id) {
+            Ok(placement) => placement,
+            Err(error) => return Err(self.population_error(map_publish_error(error))),
+        };
         let reserved = placement.content().extent();
         if raster.extent() != reserved {
-            return Err(PopulateError::ExtentMismatch {
+            return Err(self.population_error(PopulateError::ExtentMismatch {
                 reserved,
                 raster: raster.extent(),
-            });
+            }));
         }
 
         let texel_bytes = usize::from(self.config.texel_bytes());
-        let source_row_bytes = usize::from(reserved.width())
-            .checked_mul(texel_bytes)
-            .ok_or(PopulateError::RasterLayoutOverflow)?;
+        let source_row_bytes = match usize::from(reserved.width()).checked_mul(texel_bytes) {
+            Some(bytes) => bytes,
+            None => return Err(self.population_error(PopulateError::RasterLayoutOverflow)),
+        };
         if raster.bytes_per_row() < source_row_bytes {
-            return Err(PopulateError::StrideTooSmall);
+            return Err(self.population_error(PopulateError::StrideTooSmall));
         }
-        let required = usize::from(reserved.height() - 1)
+        let Some(required) = usize::from(reserved.height() - 1)
             .checked_mul(raster.bytes_per_row())
             .and_then(|rows| rows.checked_add(source_row_bytes))
-            .ok_or(PopulateError::RasterLayoutOverflow)?;
+        else {
+            return Err(self.population_error(PopulateError::RasterLayoutOverflow));
+        };
         if raster.bytes().len() < required {
-            return Err(PopulateError::DataTooShort);
+            return Err(self.population_error(PopulateError::DataTooShort));
         }
-        let sequence = self
-            .upload_sequence
-            .checked_add(1)
-            .ok_or(PopulateError::UploadSequenceExhausted)?;
+        let Some(sequence) = self.upload_sequence.checked_add(1) else {
+            return Err(self.population_error(PopulateError::UploadSequenceExhausted));
+        };
 
         self.write_raster(placement, raster, source_row_bytes);
-        let publication = self
-            .atlas
-            .publish(id, metadata)
-            .map_err(map_publish_error)?;
+        let publication = match self.atlas.publish(id, metadata) {
+            Ok(publication) => publication,
+            Err(error) => return Err(self.population_error(map_publish_error(error))),
+        };
         self.upload_sequence = sequence;
         self.pages[placement.page().index() as usize]
             .dirty
@@ -515,6 +524,11 @@ where
         }
     }
 
+    fn population_error(&mut self, error: PopulateError) -> PopulateError {
+        self.metrics.population_failures = self.metrics.population_failures.saturating_add(1);
+        error
+    }
+
     fn page_bytes_per_row(&self) -> usize {
         usize::from(self.config.atlas().page_extent().width())
             * usize::from(self.config.texel_bytes())
@@ -659,6 +673,7 @@ mod tests {
         );
         assert_eq!(cache.stats().dirty_regions(), 0);
         assert!(!cache.is_ready(reserved.entry()));
+        assert_eq!(cache.metrics().population_failures(), 3);
     }
 
     #[test]

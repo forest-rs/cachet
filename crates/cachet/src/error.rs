@@ -17,7 +17,7 @@ pub enum ReserveError {
         /// Configured page extent.
         page: Extent,
     },
-    /// The same key is already reserved with a different content extent.
+    /// The same key already exists with a different content extent.
     ConflictingExtent {
         /// Extent retained by the existing entry.
         existing: Extent,
@@ -40,7 +40,7 @@ impl fmt::Display for ReserveError {
                 formatter.write_str("the padded artifact does not fit on an atlas page")
             }
             Self::ConflictingExtent { .. } => {
-                formatter.write_str("one atlas key cannot use conflicting raster extents")
+                formatter.write_str("one atlas key cannot use conflicting artifact extents")
             }
             Self::NoSpace => formatter.write_str(
                 "atlas pages are full and no unleased entry can satisfy the reservation",
@@ -78,7 +78,7 @@ impl core::error::Error for PublishError {}
 pub enum AbortError {
     /// The entry identifier is stale or unknown.
     InvalidEntry(EntryId),
-    /// The entry has already been populated or retired.
+    /// The entry has already been published or retired.
     NotReserved(EntryId),
 }
 

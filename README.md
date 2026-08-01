@@ -17,9 +17,24 @@ coverage atlas and an RGBA8 color atlas therefore use separate caches, as do
 CPU-mirrored and directly GPU-rendered pages or sprites whose sampling,
 padding, color-space, or retention requirements differ from color glyphs.
 
-The initial public API is being implemented under Beads epic `cac-2qv`. The
+The clean-root implementation is tracked under Beads epic `cac-2qv`. Its
 accepted boundary is recorded in
 [`crates/cachet/docs/adr-0001-raster-artifact-atlas.md`](crates/cachet/docs/adr-0001-raster-artifact-atlas.md).
+
+## Runnable examples
+
+```sh
+cargo run -p glyph-atlas-demo
+cargo run -p gpu-atlas-demo
+cargo run -p sprite-atlas-demo
+```
+
+- `glyph-atlas-demo` composes separate CPU-backed R8 coverage and RGBA8 color
+  caches and walks their dirty-upload lifecycle.
+- `gpu-atlas-demo` simulates the boundary Tavolo would own: page textures,
+  command ordering, submission serials, and fence-driven lease release.
+- `sprite-atlas-demo` uses sprite-native keys and pivot metadata with a
+  CPU-backed RGBA8 cache.
 
 ## Issue tracking
 

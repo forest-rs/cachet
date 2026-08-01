@@ -10,5 +10,6 @@ target/
 
 # Editors and operating systems
 .DS_Store
+*.swp
 .idea/
 .vscode/

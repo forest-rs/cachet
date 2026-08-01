@@ -131,9 +131,9 @@ impl<'a, M> ArtifactRef<'a, M> {
 /// State observed by a reservation request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReservationStatus {
-    /// The key already has populated pixels.
+    /// The key already has a published artifact.
     Ready,
-    /// The key has an existing reservation awaiting population.
+    /// The key has an existing reservation awaiting publication.
     Pending,
     /// This call created a reservation that the caller owns.
     Vacant,
@@ -169,7 +169,7 @@ impl Reservation {
         self.status
     }
 
-    /// Returns whether this call created a reservation requiring population.
+    /// Returns whether this call created a reservation requiring production.
     #[must_use]
     pub const fn needs_population(self) -> bool {
         matches!(self.status, ReservationStatus::Vacant)
