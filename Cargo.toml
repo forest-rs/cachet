@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/cachet",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0 OR MIT"
+repository = "https://github.com/forest-rs/cachet"
+
+[workspace.lints.rust]
+missing_debug_implementations = "warn"
+missing_docs = "warn"
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+allow_attributes = "warn"
+doc_markdown = "warn"
+
+[workspace.dependencies]
+hashbrown = { default-features = false, features = ["default-hasher"], version = "0.17.1" }

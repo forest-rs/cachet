@@ -1,0 +1,8 @@
+include = ["**/*.toml"]
+
+[formatting]
+align_entries = false
+array_auto_collapse = false
+array_auto_expand = true
+column_width = 100
+reorder_keys = false

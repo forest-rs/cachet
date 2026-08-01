@@ -1,0 +1,16 @@
+[package]
+name = "cachet"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A bounded raster-artifact atlas for glyphs, sprites, icons, and image patches"
+keywords = ["cache", "glyph", "sprite", "atlas", "rendering"]
+categories = ["rendering", "no-std"]
+
+[dependencies]
+hashbrown.workspace = true
+
+[lints]
+workspace = true
