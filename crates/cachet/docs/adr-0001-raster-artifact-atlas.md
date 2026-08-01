@@ -1,4 +1,4 @@
-# ADR-0001: Cachet is a homogeneous raster-artifact atlas
+# ADR-0001: Separate atlas placement from pixel backing
 
 - Status: Accepted
 - Date: 2026-08-02
@@ -12,100 +12,140 @@ to serve atlas artifacts, tiled surfaces, and general GPU resources through a
 shared residency vocabulary. Those systems have materially different demand,
 fallback, and lifetime models.
 
-Tavolo and Underwood provide a concrete first consumer: repeated glyph rasters
-need bounded packing, partial uploads, stable placements, and protection from
-pixel reuse while prepared work still samples them. Sprite, icon, and small
-image-patch consumers have the same storage lifecycle when their artifacts are
-small immutable raster rectangles.
+Tavolo and Underwood provide the first concrete consumers. Repeated glyph
+rasters need bounded rectangle packing, stable placements, and protection from
+reuse while prepared work still samples them. Some artifacts arrive as CPU
+rasters that require partial uploads; others may be rendered directly into a
+GPU atlas page. Pixel backing and production therefore cannot be an invariant
+of the placement cache itself.
 
 ## Fence
 
-`cachet` owns bounded page storage, rectangle packing, keyed artifact validity,
-lease-safe pixel reuse, CPU page bytes, dirty upload regions, and atlas
-diagnostics; it explicitly does not own rasterization, font or animation
-semantics, pixel interpretation, GPU resources, upload execution, draw
-batching, submissions, tiled surfaces, or general resource lifetime.
+`AtlasCache` owns bounded rectangle placement, keyed artifact validity,
+publication state, lease-safe reuse, and lifecycle and packing diagnostics; it
+explicitly does not own pixel storage, rasterization, pixel interpretation,
+GPU resources, command submission, completion fences, tiled surfaces, or
+general resource lifetime.
+
+`CpuAtlasCache` composes `AtlasCache` with homogeneous CPU page mirrors,
+validated raster copying, dirty upload regions, and byte and upload
+diagnostics; it explicitly does not execute uploads or own GPU synchronization.
 
 ## Invariants
 
-1. A caller key identifies every fact affecting raster pixels. Cachet never
+1. A caller key identifies every fact affecting produced pixels. Cachet never
    decides whether two glyphs, sprites, or image patches are equivalent.
-2. One `AtlasCache` instance is one complete compatibility domain: page extent,
-   bytes per texel, padding, pixel interpretation, sampling contract, and
-   retention policy agree for every entry.
-3. Incompatible domains use separate cache instances. R8 coverage and RGBA8
-   color glyphs are the first proof; equal byte widths alone never establish
-   compatibility.
-4. A reservation is not valid for lookup until raster bytes and caller-owned
-   artifact metadata have been populated together.
-5. Entry identifiers are generational. Eviction or invalidation makes stale
+2. One cache instance is one complete compatibility domain: page extent,
+   padding, backing authority, production ordering, pixel interpretation,
+   sampling contract, and retention policy agree for every entry.
+3. Incompatible domains use separate cache instances. R8 coverage, RGBA8
+   color glyphs, sprites, CPU-mirrored pages, and directly rendered GPU pages
+   are separate whenever any of those contracts differ. Equal byte widths do
+   not establish compatibility.
+4. A vacant reservation owns physical placement and is not evictable, but is
+   not visible to lookup.
+5. Publication stores caller metadata and makes an entry visible. It
+   atomically returns an initial lease, closing the interval in which newly
+   published pixels could otherwise be reused before producer or consumer work
+   retains them.
+6. Publication means the caller has made content available under its execution
+   ordering contract. It does not mean a GPU submission has completed.
+7. Entry identifiers are generational. Eviction or invalidation makes stale
    identifiers fail even after their table slot is reused.
-6. Pixels protected by a live lease are never overwritten. Invalidation removes
+8. A placement protected by a live lease is never reused. Invalidation removes
    the logical key immediately but defers physical reuse until leases drop.
-7. Capacity is physical: fixed page dimensions and a maximum page count replace
-   abstract costs, priorities, and generic budgets.
-8. Cachet records dirty page regions and exposes page bytes. Consumers own GPU
-   page creation, transfers, synchronization, and acknowledgement.
-9. Current gauges and cumulative counters expose memory, packing,
-   fragmentation, lookup work, evictions, deferred reuse, and upload work.
+9. Cachet owns no GPU fence. Tavolo or another caller retains publication and
+   reader leases until every relevant submission can no longer write or sample
+   their placements.
+10. CPU population publishes only after a complete validated copy. CPU pages
+    record dirty regions and expose bytes; consumers own page creation,
+    transfers, synchronization, and acknowledgement.
+11. Current gauges and cumulative counters expose placement occupancy,
+    fragmentation, probes, production, eviction, deferred reuse, and—where
+    applicable—CPU memory and upload work.
 
 ## Options considered
 
-### Generic residency kernel plus workload adapters
+### One cache with CPU/GPU modes
 
-Rejected. It shares vocabulary while pushing ownership behavior into callbacks
-and bindings. Tiled surfaces and GPU resource domains should develop locally.
+Rejected. Optional page bytes and mode-dependent methods would make invalid
+states part of the central API. Mixing a CPU mirror with direct GPU writes can
+also make the mirror stale and allow a later upload to overwrite GPU-produced
+content.
 
-### One multi-format atlas manager
+### A generic backing trait
 
-Rejected for the first slice. A format registry and routing policy would make
-the core responsible for domain composition before a consumer proves that the
-same batching, padding, sampling, and capacity policy should be shared.
+Rejected for the first slice. Production, visibility, and synchronization
+policy would move into callbacks while making the public cache harder to
+explain. Two concrete layers express the real ownership boundary directly.
 
-### One homogeneous cache composed by the caller
+### A placement core plus a concrete CPU facade
 
-Chosen. The core owns one complete atlas lifecycle. A glyph integration can
-hold separate coverage and color caches; a sprite system can hold another
-cache with sprite-native keys and metadata. A small higher-level set may be
-added only after two integrations prove identical composition semantics.
+Chosen. `AtlasCache<K, M>` provides the storage-independent atlas lifecycle.
+`CpuAtlasCache<K, M>` delegates that lifecycle while adding CPU storage and
+dirty uploads. A direct GPU consumer uses the placement core and owns the
+mapping from stable page identifiers to GPU textures.
 
-## First slice
+This shares atlas behavior below the pixel-backing boundary without becoming
+a generic residency kernel.
 
-The public seam consists of:
+## First slices
 
-- `AtlasConfig` describing fixed page extent, maximum pages, bytes per texel,
-  and padding;
-- caller-defined keys and caller metadata stored by `AtlasCache<K, M>`;
-- direct reserve, populate, lookup, abort, and invalidate operations;
-- generational entry and stable page identifiers;
-- leases over ready entries;
-- checkpointed dirty-region collection, page byte access, and explicit upload
-  acknowledgement;
-- deterministic LRU eviction among ready unleased entries;
-- cache-wide metrics and per-page packing/upload gauges.
+The placement seam consists of:
+
+- `AtlasConfig` describing fixed page extent, maximum pages, and padding;
+- caller-defined keys and metadata stored by `AtlasCache<K, M>`;
+- direct reserve, publish, lookup, abort, invalidate, and reclaim operations;
+- generational entry and stable append-only page identifiers;
+- publication and reader leases over ready entries;
+- deterministic LRU eviction among ready unleased entries; and
+- cache-wide lifecycle metrics and per-page packing gauges.
+
+The CPU seam adds:
+
+- a homogeneous bytes-per-texel configuration;
+- lazily allocated zeroed page mirrors;
+- checked raster extent, row-stride, byte-length, and padded copying;
+- checkpointed dirty-region collection and explicit acknowledgement;
+- whole-page and region byte views; and
+- CPU memory, copied-byte, and pending-upload diagnostics.
 
 The rectangle allocator is private and replaceable. The first implementation
 uses deterministic guillotine splits and adjacent-region coalescing.
 
+## Direct GPU production protocol
+
+1. Reserve a vacant placement. Its reservation state prevents reuse.
+2. Ensure the caller-owned GPU page for the stable page identifier exists.
+3. Encode the write into the reserved rectangle.
+4. Publish the metadata and receive the initial lease atomically.
+5. Retain that lease until producer ordering and every prepared reader permit
+   reuse. Tavolo translates its submission completion into ordinary lease
+   drops.
+
+On an ordered queue, publication may occur after command encoding rather than
+after physical GPU completion. Cross-queue visibility remains entirely the
+caller's responsibility.
+
 ## Tradeoffs and extension points
 
-- Separate format domains mean callers dispatch between coverage, color, or
-  sprite caches. This keeps compatibility visible and prevents an arbitrary
-  class router from becoming policy infrastructure.
-- A small per-entry lease anchor costs one allocation but makes release follow
-  ordinary Rust ownership without importing GPU submission concepts.
-- CPU page mirrors consume predictable memory and enable backend-independent
-  raster population and upload recovery.
+- The CPU facade repeats a small amount of lifecycle-shaped API so callers do
+  not need to manipulate its inner placement cache or bypass byte invariants.
+- Separate backing domains require caller dispatch. This prevents CPU mirrors
+  and direct GPU writers from silently corrupting each other's authority.
+- A small per-entry lease anchor costs one allocation but follows ordinary Rust
+  ownership without importing submission concepts.
 - LRU is fixed initially. A second measured workload must justify another
   eviction policy before the API grows a policy trait.
-- Palette, foreground color, variation coordinates, synthesis, hinting, and
-  other raster-affecting facts belong in color-glyph keys. Paint applied after
+- Palette, variation coordinates, synthesis, hinting, and other
+  raster-affecting facts belong in color-glyph keys. Paint applied after
   sampling does not belong in R8 coverage keys.
 - Sprite animation stays outside Cachet: frames may be separate immutable keys
   or regions within a caller-produced sheet.
 
 ## Consequences
 
-Cachet is useful to glyph and sprite consumers without claiming ownership of
-their semantics. Deliberate composition above this crate is preferred over
-speculative common control below it.
+CPU glyph and sprite consumers get an ergonomic raster cache. Direct GPU
+producers get the same placement, validity, and reuse guarantees without a
+redundant or stale CPU mirror. Cachet remains an atlas system rather than the
+conceptual foundation for Tavolo's broader GPU resource domain.
