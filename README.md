@@ -58,7 +58,9 @@ remote. It is independent from ordinary Git source history.
 ```sh
 # Fresh clone
 chmod 700 .beads
+git config beads.role contributor # use maintainer when appropriate
 bd bootstrap
+bd hooks install --beads
 
 # Work session
 bd prime
