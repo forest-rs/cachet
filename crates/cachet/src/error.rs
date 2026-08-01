@@ -96,6 +96,8 @@ impl core::error::Error for AbortError {}
 /// Failure to lease a set of ready entries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LeaseError {
+    /// A reusable output lease still protects earlier work.
+    TargetNotEmpty,
     /// An entry identifier is stale or unknown.
     InvalidEntry(EntryId),
     /// An entry exists but is not populated and ready.
@@ -105,6 +107,9 @@ pub enum LeaseError {
 impl fmt::Display for LeaseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::TargetNotEmpty => {
+                formatter.write_str("the reusable lease must be empty before filling")
+            }
             Self::InvalidEntry(_) => formatter.write_str("a leased entry is stale or unknown"),
             Self::NotReady(_) => formatter.write_str("a leased entry is not ready"),
         }

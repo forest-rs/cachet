@@ -13,3 +13,7 @@ for the boundary and first-slice invariants.
 
 Runnable workspace examples cover mixed coverage/color glyphs, direct GPU
 population ownership, and a sprite-shaped consumer.
+
+For prepared frames with many entries, reuse an empty `Lease` with
+`lease_into`; the wind tunnel verifies that retained batch capacity makes this
+steady-state path allocation-free.

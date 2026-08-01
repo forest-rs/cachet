@@ -368,6 +368,15 @@ where
         self.atlas.lease(entries)
     }
 
+    /// Pins ready entries into an empty caller-owned reusable lease.
+    pub fn lease_into(
+        &mut self,
+        entries: impl IntoIterator<Item = EntryId>,
+        target: &mut Lease,
+    ) -> Result<(), LeaseError> {
+        self.atlas.lease_into(entries, target)
+    }
+
     /// Reclaims retired placements whose final external lease has dropped.
     pub fn reclaim(&mut self) -> u32 {
         self.atlas.reclaim()

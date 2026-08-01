@@ -36,6 +36,20 @@ cargo run -p sprite-atlas-demo
 - `sprite-atlas-demo` uses sprite-native keys and pivot metadata with a
   CPU-backed RGBA8 cache.
 
+## Performance wind tunnel
+
+`cachet_wind_tunnel` keeps Criterion and optional allocation instrumentation
+outside the core crate:
+
+```sh
+cargo bench -p cachet_wind_tunnel --bench atlas
+cargo run --release -p cachet_wind_tunnel --features allocation-counting
+```
+
+The allocation run contains executable steady-state budgets. Current reference
+results live in
+[`benchmarks/cachet_wind_tunnel/RESULTS.md`](benchmarks/cachet_wind_tunnel/RESULTS.md).
+
 ## Issue tracking
 
 Issue history lives in a Dolt database synchronized through this repository's

@@ -280,7 +280,13 @@ impl<K, M> Invalidated<K, M> {
 /// [`AtlasCache::reclaim`](crate::AtlasCache::reclaim) makes retired space
 /// reusable.
 pub struct Lease {
-    pins: Vec<Arc<()>>,
+    first: Option<LeasePin>,
+    remaining: Vec<LeasePin>,
+}
+
+struct LeasePin {
+    entry: EntryId,
+    _pin: Arc<()>,
 }
 
 /// Newly published placement and its initial reuse-protection lease.
@@ -332,20 +338,93 @@ impl Publication {
 }
 
 impl Lease {
-    pub(crate) const fn new(pins: Vec<Arc<()>>) -> Self {
-        Self { pins }
+    /// Creates an empty reusable lease token.
+    ///
+    /// Use [`AtlasCache::lease_into`](crate::AtlasCache::lease_into) to fill
+    /// this token. After the protected work completes, [`clear`](Self::clear)
+    /// releases its pins while retaining batch capacity for the next frame.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            first: None,
+            remaining: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_capacity(entries: usize) -> Self {
+        Self {
+            first: None,
+            remaining: Vec::with_capacity(entries.saturating_sub(1)),
+        }
+    }
+
+    pub(crate) fn one(entry: EntryId, pin: Arc<()>) -> Self {
+        Self {
+            first: Some(LeasePin { entry, _pin: pin }),
+            remaining: Vec::new(),
+        }
+    }
+
+    pub(crate) fn reserve(&mut self, entries: usize) {
+        let needed = entries.saturating_sub(1);
+        if needed > self.remaining.capacity() {
+            self.remaining.reserve_exact(needed);
+        }
+    }
+
+    pub(crate) fn contains(&self, entry: EntryId) -> bool {
+        self.first.as_ref().is_some_and(|pin| pin.entry == entry)
+            || self.remaining.iter().any(|pin| pin.entry == entry)
+    }
+
+    pub(crate) fn push(&mut self, entry: EntryId, pin: Arc<()>) {
+        let pin = LeasePin { entry, _pin: pin };
+        if self.first.is_none() {
+            self.first = Some(pin);
+        } else {
+            self.remaining.push(pin);
+        }
+    }
+
+    pub(crate) fn entry_ids(&self) -> impl Iterator<Item = EntryId> + '_ {
+        self.first
+            .iter()
+            .chain(&self.remaining)
+            .map(|pin| pin.entry)
     }
 
     /// Returns the number of distinct protected entries.
     #[must_use]
     pub fn entries(&self) -> usize {
-        self.pins.len()
+        usize::from(self.first.is_some()) + self.remaining.len()
     }
 
     /// Returns whether no entries are protected.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.pins.is_empty()
+        self.first.is_none()
+    }
+
+    /// Releases every pin while retaining storage for a later batch.
+    ///
+    /// This is equivalent to dropping the lease for reuse purposes. Call it
+    /// only after all producer and consumer work protected by this token has
+    /// completed.
+    pub fn clear(&mut self) {
+        self.first = None;
+        self.remaining.clear();
+    }
+
+    /// Returns the number of distinct entries that fit without allocation.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        1 + self.remaining.capacity()
+    }
+}
+
+impl Default for Lease {
+    fn default() -> Self {
+        Self::empty()
     }
 }
 

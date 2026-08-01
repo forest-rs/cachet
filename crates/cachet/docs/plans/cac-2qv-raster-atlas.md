@@ -24,7 +24,9 @@ and a sprite-shaped consumer.
    observability over the placement core.
 4. `cac-2qv.3`: prove R8/RGBA8 glyph caches, direct GPU production, and a
    sprite consumer with runnable top-level samples.
-5. `cac-2qv.4`: run gates and publish source and Dolt histories.
+5. `cac-2qv.6`: establish Criterion timing and steady-state allocation gates
+   in the separate `cachet_wind_tunnel` crate.
+6. `cac-2qv.4`: run gates and publish source and Dolt histories.
 
 The Beads dependency graph is the source of truth for ordering.
 
@@ -43,6 +45,9 @@ The Beads dependency graph is the source of truth for ordering.
   dirty records that existed when collected.
 - Bytes per texel can be mistaken for complete compatibility; examples keep
   coverage, color glyph, GPU-written, and sprite domains explicit.
+- Batch leases can allocate per prepared frame; the wind tunnel gates both the
+  ordinary owned result and a caller-retained `Lease` buffer through
+  `lease_into`.
 
 ## Validation
 
@@ -56,6 +61,8 @@ cargo doc --no-deps
 cargo run -p glyph-atlas-demo
 cargo run -p gpu-atlas-demo
 cargo run -p sprite-atlas-demo
+cargo bench -p cachet_wind_tunnel --bench atlas
+cargo run --release -p cachet_wind_tunnel --features allocation-counting
 bd config validate
 bd dep cycles
 bd dolt push

@@ -1,0 +1,23 @@
+[package]
+name = "cachet_wind_tunnel"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+allocation-counting = ["dep:allocation-counter"]
+
+[dependencies]
+allocation-counter = { version = "0.8.1", optional = true }
+cachet = { path = "../../crates/cachet" }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false }
+
+[[bench]]
+name = "atlas"
+harness = false
+
+[lints]
+workspace = true

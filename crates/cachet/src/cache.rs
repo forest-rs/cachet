@@ -1,7 +1,7 @@
 // Copyright 2026 the Cachet Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use alloc::{sync::Arc, vec, vec::Vec};
+use alloc::{sync::Arc, vec::Vec};
 use core::hash::Hash;
 
 use hashbrown::HashMap;
@@ -26,12 +26,12 @@ struct Entry<K, M> {
     placement: Placement,
     phase: EntryPhase,
     last_used: u64,
-    pin: Arc<()>,
 }
 
 #[derive(Debug)]
 struct EntrySlot<K, M> {
     generation: u32,
+    pin: Arc<()>,
     entry: Option<Entry<K, M>>,
 }
 
@@ -175,7 +175,6 @@ where
 
         let allocation_extent = self.allocation_extent(extent)?;
         self.reclaim();
-        let id = self.next_entry_id()?;
         let (page, allocation) = loop {
             if let Some(placement) = self.try_allocate(allocation_extent) {
                 break placement;
@@ -188,6 +187,13 @@ where
                 return Err(ReserveError::NoSpace);
             };
             evicted.push(removed);
+        };
+        let id = match self.next_entry_id() {
+            Ok(id) => id,
+            Err(error) => {
+                self.pages[page.index() as usize].allocator.free(allocation);
+                return Err(error);
+            }
         };
 
         let padding = self.config.padding();
@@ -206,7 +212,6 @@ where
                 placement,
                 phase: EntryPhase::Reserved,
                 last_used: 0,
-                pin: Arc::new(()),
             },
         );
         let previous = self.index.insert(key, id);
@@ -229,14 +234,16 @@ where
         }
 
         let last_used = self.next_access_sequence();
-        let entry = self.entry_mut(id).expect("validated entry remains present");
-        entry.metadata = Some(metadata);
-        entry.phase = EntryPhase::Ready;
-        entry.last_used = last_used;
-        let placement = entry.placement;
-        let pin = Arc::clone(&entry.pin);
+        let placement = {
+            let entry = self.entry_mut(id).expect("validated entry remains present");
+            entry.metadata = Some(metadata);
+            entry.phase = EntryPhase::Ready;
+            entry.last_used = last_used;
+            entry.placement
+        };
+        let pin = Arc::clone(&self.slot(id).expect("validated slot remains present").pin);
         self.metrics.publications = self.metrics.publications.saturating_add(1);
-        Ok(Publication::new(placement, Lease::new(vec![pin])))
+        Ok(Publication::new(placement, Lease::one(id, pin)))
     }
 
     /// Aborts a vacant reservation and returns its key.
@@ -259,10 +266,8 @@ where
     /// Removes a key immediately and defers physical reuse when it is leased.
     pub fn invalidate(&mut self, key: &K) -> Option<Invalidated<K, M>> {
         let id = self.index.remove(key)?;
-        let leased = {
-            let entry = self.entry(id).expect("indexed entries remain present");
-            Arc::strong_count(&entry.pin) > 1
-        };
+        let leased =
+            Arc::strong_count(&self.slot(id).expect("indexed entries remain present").pin) > 1;
         self.metrics.invalidations = self.metrics.invalidations.saturating_add(1);
 
         if leased {
@@ -291,55 +296,80 @@ where
         &mut self,
         entries: impl IntoIterator<Item = EntryId>,
     ) -> Result<Lease, LeaseError> {
-        let mut ids = Vec::new();
+        let entries = entries.into_iter();
+        let mut lease = Lease::with_capacity(entries.size_hint().0);
+        self.lease_into(entries, &mut lease)?;
+        Ok(lease)
+    }
+
+    /// Pins ready entries into an empty caller-owned reusable lease.
+    ///
+    /// Reusing one token per in-flight frame amortizes batch storage. The
+    /// target must be empty so a failed request cannot accidentally release
+    /// earlier protected work. Call [`Lease::clear`] only after that work has
+    /// completed, then pass the retained token here again.
+    pub fn lease_into(
+        &mut self,
+        entries: impl IntoIterator<Item = EntryId>,
+        target: &mut Lease,
+    ) -> Result<(), LeaseError> {
+        if !target.is_empty() {
+            return Err(LeaseError::TargetNotEmpty);
+        }
+        let entries = entries.into_iter();
+        target.reserve(entries.size_hint().0);
         for id in entries {
-            if ids.contains(&id) {
+            if target.contains(id) {
                 continue;
             }
-            let entry = self.entry(id).ok_or(LeaseError::InvalidEntry(id))?;
+            let entry = match self.entry(id) {
+                Some(entry) => entry,
+                None => {
+                    target.clear();
+                    return Err(LeaseError::InvalidEntry(id));
+                }
+            };
             if entry.phase != EntryPhase::Ready {
+                target.clear();
                 return Err(LeaseError::NotReady(id));
             }
-            ids.push(id);
+            let pin = Arc::clone(&self.slot(id).expect("validated slot remains present").pin);
+            target.push(id, pin);
         }
 
-        let mut pins = Vec::with_capacity(ids.len());
-        for id in ids {
-            let last_used = self.next_access_sequence();
-            let entry = self.entry_mut(id).expect("validated entry remains present");
-            entry.last_used = last_used;
-            pins.push(Arc::clone(&entry.pin));
+        for id in target.entry_ids() {
+            self.touch(id);
         }
         self.metrics.lease_batches = self.metrics.lease_batches.saturating_add(1);
         self.metrics.leased_entries = self
             .metrics
             .leased_entries
-            .saturating_add(pins.len() as u64);
-        Ok(Lease::new(pins))
+            .saturating_add(target.entries() as u64);
+        Ok(())
     }
 
     /// Reclaims retired placements whose final external lease has dropped.
     ///
     /// Reservations call this automatically before applying capacity pressure.
     pub fn reclaim(&mut self) -> u32 {
-        let ids: Vec<_> = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                let entry = slot.entry.as_ref()?;
-                (entry.phase == EntryPhase::Retired && Arc::strong_count(&entry.pin) == 1)
-                    .then(|| EntryId::new(index as u32, slot.generation))
-            })
-            .collect();
-
-        for id in &ids {
-            let entry = self
-                .take_entry(*id)
-                .expect("selected entries remain present");
-            self.free_placement(entry.placement);
+        let mut reclaimed = 0_u32;
+        for index in 0..self.entries.len() {
+            let eligible = {
+                let slot = &self.entries[index];
+                slot.entry
+                    .as_ref()
+                    .is_some_and(|entry| entry.phase == EntryPhase::Retired)
+                    && Arc::strong_count(&slot.pin) == 1
+            };
+            if eligible {
+                let id = EntryId::new(index as u32, self.entries[index].generation);
+                let entry = self
+                    .take_entry(id)
+                    .expect("selected entries remain present");
+                self.free_placement(entry.placement);
+                reclaimed = reclaimed.saturating_add(1);
+            }
         }
-        let reclaimed = ids.len() as u32;
         self.metrics.reclaims = self.metrics.reclaims.saturating_add(u64::from(reclaimed));
         reclaimed
     }
@@ -399,7 +429,10 @@ where
             free_regions: stored.allocator.free_regions(),
             largest_free_region: stored.allocator.largest_free_region().map(Rect::extent),
         };
-        for entry in self.entries.iter().filter_map(|slot| slot.entry.as_ref()) {
+        for slot in &self.entries {
+            let Some(entry) = slot.entry.as_ref() else {
+                continue;
+            };
             if entry.placement.page() != page {
                 continue;
             }
@@ -414,7 +447,7 @@ where
                     stats.retired_entries = stats.retired_entries.saturating_add(1);
                 }
             }
-            if Arc::strong_count(&entry.pin) > 1 {
+            if Arc::strong_count(&slot.pin) > 1 {
                 stats.leased_entries = stats.leased_entries.saturating_add(1);
             }
         }
@@ -471,17 +504,17 @@ where
     }
 
     fn evict_lru(&mut self) -> Option<Evicted<K, M>> {
-        let (index, generation) = self
-            .entries
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                let entry = slot.entry.as_ref()?;
-                (entry.phase == EntryPhase::Ready && Arc::strong_count(&entry.pin) == 1)
-                    .then_some((entry.last_used, index, slot.generation))
-            })
-            .min_by_key(|(last_used, index, _)| (*last_used, *index))
-            .map(|(_, index, generation)| (index, generation))?;
+        let (index, generation) =
+            self.entries
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| {
+                    let entry = slot.entry.as_ref()?;
+                    (entry.phase == EntryPhase::Ready && Arc::strong_count(&slot.pin) == 1)
+                        .then_some((entry.last_used, index, slot.generation))
+                })
+                .min_by_key(|(last_used, index, _)| (*last_used, *index))
+                .map(|(_, index, generation)| (index, generation))?;
         let id = EntryId::new(index as u32, generation);
         let entry = self
             .take_entry(id)
@@ -519,14 +552,21 @@ where
         if index == self.entries.len() {
             self.entries.push(EntrySlot {
                 generation: id.generation(),
+                pin: Arc::new(()),
                 entry: Some(entry),
             });
             return;
         }
         let slot = &mut self.entries[index];
         debug_assert!(slot.entry.is_none());
+        debug_assert_eq!(Arc::strong_count(&slot.pin), 1);
         slot.generation = id.generation();
         slot.entry = Some(entry);
+    }
+
+    fn slot(&self, id: EntryId) -> Option<&EntrySlot<K, M>> {
+        let slot = self.entries.get(id.index() as usize)?;
+        (slot.generation == id.generation()).then_some(slot)
     }
 
     fn entry(&self, id: EntryId) -> Option<&Entry<K, M>> {
@@ -721,6 +761,24 @@ mod tests {
         assert_eq!(cache.stats().leased_entries(), 1);
         assert_eq!(cache.metrics().lease_batches(), 1);
         assert_eq!(cache.metrics().leased_entries(), 1);
+
+        let mut reusable = Lease::empty();
+        cache
+            .lease_into([a.entry(), a.entry()], &mut reusable)
+            .expect("reusable lease");
+        assert_eq!(reusable.entries(), 1);
+        assert_eq!(
+            cache.lease_into([a.entry()], &mut reusable),
+            Err(LeaseError::TargetNotEmpty)
+        );
+        reusable.clear();
+        let capacity = reusable.capacity();
+        assert!(matches!(
+            cache.lease_into([pending.entry()], &mut reusable),
+            Err(LeaseError::NotReady(id)) if id == pending.entry()
+        ));
+        assert!(reusable.is_empty());
+        assert_eq!(reusable.capacity(), capacity);
     }
 
     #[test]
